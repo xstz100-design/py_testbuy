@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# Sensitive data
+scripts/auth.json
+scripts/telegram_session.json
+scripts/config.py
+
+# Logs
+*.log
+watchdog.log
+bot.log
+
+# Screenshots (generated)
+scripts/screenshots/*.png
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.tmp
+tmp*.txt
