@@ -15,17 +15,17 @@ BROWSER = {
     "viewport": {"width": 1440, "height": 900},
 }
 TIMEOUT = {
-    "navigation": 45000 if SPEED_MODE == "fast" else 60000,
-    "element": 20000 if SPEED_MODE == "fast" else 30000,
+    "navigation": 20000 if SPEED_MODE == "fast" else 45000,
+    "element": 10000 if SPEED_MODE == "fast" else 20000,
 }
 
 # Delays in milliseconds (configurable per speed mode)
 DELAYS = {
     "page_load": 1500 if SPEED_MODE == "fast" else 3000,
-    "dropdown_scroll": 100 if SPEED_MODE == "fast" else 250,
-    "spa_switch": 600 if SPEED_MODE == "fast" else 1200,
+    "dropdown_scroll": 100 if SPEED_MODE == "fast" else 200,
+    "spa_switch": 500 if SPEED_MODE == "fast" else 1000,
     "input_verify": 200 if SPEED_MODE == "fast" else 400,
-    "popup_check": 300 if SPEED_MODE == "fast" else 700,
+    "popup_check": 300 if SPEED_MODE == "fast" else 600,
 }
 
 # Long-term stability config
@@ -37,7 +37,7 @@ STABILITY = {
     "network_retry_delay": 5,
     "heartbeat_interval": 300,
     "memory_warning_mb": 1024,
-    "screenshot_retention_days": 3,
+    "screenshot_retention_days": 1,
 }
 
 # Telegram Bot Configuration
@@ -52,15 +52,51 @@ TRADE_DEFAULTS = {
 }
 
 CURRENCY_CATEGORIES = {
+    # Crypto
     "BTC": "crypto",
     "ETH": "crypto",
     "LTC": "crypto",
     "LINK": "crypto",
     "DOGE": "crypto",
     "BNB": "crypto",
+    "SOL": "crypto",
+    "XRP": "crypto",
+    "ADA": "crypto",
+    "DOT": "crypto",
+    "MATIC": "crypto",
+    "SHIB": "crypto",
+    "AVAX": "crypto",
+    "TRX": "crypto",
+    "UNI": "crypto",
+    "ATOM": "crypto",
+    "XLM": "crypto",
+    "ETC": "crypto",
+    "FIL": "crypto",
+    "NEAR": "crypto",
+    "APT": "crypto",
+    # Commodity
     "GOLD": "commodity",
+    "SILVER": "commodity",
+    "CRUDE OIL": "commodity",
+    "BRENT OIL": "commodity",
+    # Forex
     "EUR/USD": "forex",
     "USD/CAD": "forex",
     "GBP/USD": "forex",
     "EUR/JPY": "forex",
+    "USD/JPY": "forex",
+    "AUD/USD": "forex",
+    "NZD/USD": "forex",
+    "USD/CHF": "forex",
+    "GBP/JPY": "forex",
+    "EUR/GBP": "forex",
+    "AUD/JPY": "forex",
+    "CAD/JPY": "forex",
 }
+
+def get_display(currency):
+    """Return currency as-is, no mapping."""
+    return currency
+
+def get_category(currency):
+    return CURRENCY_CATEGORIES.get(currency.upper(), "crypto")

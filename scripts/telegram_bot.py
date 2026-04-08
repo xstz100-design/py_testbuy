@@ -893,7 +893,8 @@ def run_command(command: list[str], timeout: int = 600) -> tuple[subprocess.Comp
         
         result = extract_result_from_output(stdout_data)
         if result is None:
-            result = {"status": "error", "message": "No JSON result returned"}
+            err_hint = stderr_data.strip()[-200:] if stderr_data.strip() else "No output from subprocess"
+            result = {"status": "error", "message": f"No JSON result returned\n{err_hint}"}
         if retcode != 0 and result.get("status") == "ok":
             result = {"status": "error", "message": f"Process exited with code {retcode}"}
         
