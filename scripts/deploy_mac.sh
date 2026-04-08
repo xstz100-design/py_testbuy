@@ -83,8 +83,11 @@ mkdir -p "$SCRIPT_DIR/screenshots"
 if [ ! -f "$SCRIPT_DIR/config.py" ]; then
     if [ -f "$SCRIPT_DIR/config.example.py" ]; then
         cp "$SCRIPT_DIR/config.example.py" "$SCRIPT_DIR/config.py"
-        warn "config.py created from template - EDIT IT with your credentials!"
-        warn "  nano $SCRIPT_DIR/config.py"
+        # Auto-fill credentials
+        sed -i '' 's/ACCOUNT = "your_account"/ACCOUNT = "33334444"/' "$SCRIPT_DIR/config.py"
+        sed -i '' 's/PASSWORD = "your_password"/PASSWORD = "123456"/' "$SCRIPT_DIR/config.py"
+        sed -i '' 's/TELEGRAM_BOT_TOKEN = "your_telegram_bot_token"/TELEGRAM_BOT_TOKEN = "8706026109:AAF1js4zVTy05jpHFAIhPSa9V-zCBnnJ6Uo"/' "$SCRIPT_DIR/config.py"
+        info "config.py created with credentials auto-filled"
     else
         error "config.py and config.example.py both missing!"
     fi
