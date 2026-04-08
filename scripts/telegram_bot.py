@@ -816,7 +816,6 @@ def run_command(command: list[str], timeout: int = 600) -> tuple[subprocess.Comp
     STOP_CURRENT_FLAG.clear()
     
     try:
-        # Use Popen instead of run for better control
         CURRENT_PROCESS = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -829,41 +828,62 @@ def run_command(command: list[str], timeout: int = 600) -> tuple[subprocess.Comp
         )
         
         start_time = time.time()
-        stdout_data = ""
-        stderr_data = ""
+        
+        # Use a thread to read stdout/stderr to avoid pipe deadlock on Mac/Linux
+        import threading
+        stdout_chunks = []
+        stderr_chunks = []
+        
+        def _read_stdout():
+            for line in CURRENT_PROCESS.stdout:
+                stdout_chunks.append(line)
+        
+        def _read_stderr():
+            for line in CURRENT_PROCESS.stderr:
+                stderr_chunks.append(line)
+        
+        t_out = threading.Thread(target=_read_stdout, daemon=True)
+        t_err = threading.Thread(target=_read_stderr, daemon=True)
+        t_out.start()
+        t_err.start()
         
         while True:
-            # Check for stop signal
             if STOP_CURRENT_FLAG.is_set():
                 print("[execute] Stop signal received, terminating process")
                 CURRENT_PROCESS.terminate()
                 time.sleep(0.5)
                 if CURRENT_PROCESS.poll() is None:
                     CURRENT_PROCESS.kill()
+                t_out.join(timeout=2)
+                t_err.join(timeout=2)
                 fake_completed = subprocess.CompletedProcess(
                     args=command, returncode=-2, stdout="", stderr="Stopped by user"
                 )
                 return fake_completed, {"status": "error", "message": "Task stopped by user"}
             
-            # Check for timeout
             if time.time() - start_time > timeout:
                 print(f"[execute] TIMEOUT: Command exceeded {timeout}s limit")
                 CURRENT_PROCESS.terminate()
                 time.sleep(0.5)
                 if CURRENT_PROCESS.poll() is None:
                     CURRENT_PROCESS.kill()
+                t_out.join(timeout=2)
+                t_err.join(timeout=2)
                 fake_completed = subprocess.CompletedProcess(
                     args=command, returncode=-1, stdout="", stderr=f"Timeout after {timeout}s"
                 )
                 return fake_completed, {"status": "error", "message": f"Timeout after {timeout}s"}
             
-            # Check if process finished
             retcode = CURRENT_PROCESS.poll()
             if retcode is not None:
-                stdout_data, stderr_data = CURRENT_PROCESS.communicate()
+                t_out.join(timeout=5)
+                t_err.join(timeout=5)
                 break
             
             time.sleep(0.5)
+        
+        stdout_data = "".join(stdout_chunks)
+        stderr_data = "".join(stderr_chunks)
         
         print(f"[execute] Exit code: {retcode}")
         if stdout_data:
