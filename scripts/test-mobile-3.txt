@@ -1,3 +1,0 @@
-ETH 100 down 60s mobile
-GOLD 100 up 60s mobile
-BTC 100 down 60s mobile

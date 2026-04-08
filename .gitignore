@@ -8,6 +8,34 @@ __pycache__/
 venv/
 ENV/
 
+# Credentials & session (must not be committed)
+scripts/config.py
+scripts/auth.json
+scripts/telegram_session.json
+scripts/instances/*/config.py
+scripts/instances/*/auth.json
+scripts/instances/*/telegram_session.json
+
+# Runtime data
+scripts/screenshots/
+scripts/instances/*/screenshots/
+scripts/watchdog.log
+scripts/instances/*/watchdog.log
+scripts/.bot.pid
+scripts/instances/*/.bot.pid
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*.swo
+
 # Sensitive data
 scripts/auth.json
 scripts/telegram_session.json

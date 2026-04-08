@@ -1,3 +1,0 @@
-LTC 100 up 60s desktop
-BTC 100 down 60s desktop
-ETH 100 up 60s desktop
