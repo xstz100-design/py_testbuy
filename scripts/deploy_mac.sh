@@ -117,7 +117,11 @@ info "Verifying installation..."
 $VENV_PY -c "
 import sys
 print(f'  Python: {sys.version}')
-import playwright; print(f'  Playwright: {playwright.__version__}')
+try:
+    from importlib.metadata import version as pkg_version
+    print(f'  Playwright: {pkg_version(\"playwright\")}')
+except Exception:
+    import playwright; print('  Playwright: installed')
 import psutil; print(f'  psutil: {psutil.__version__}')
 print('  All OK!')
 "
