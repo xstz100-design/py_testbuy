@@ -1,6 +1,6 @@
-# OKXOption Automated Trading Bot
+# BPTrading Automated Trading Bot
 
-Python + Playwright automated trading system for OKXOption with Telegram integration.
+Python + Playwright automated trading system for BPTrading (bptradinguk.com) with Telegram integration.
 
 ## Features
 

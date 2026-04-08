@@ -1,4 +1,4 @@
-"""OKXOption Desktop Trade - Python + Playwright (Chromium)
+"""BPTrading Desktop Trade - Python + Playwright (Chromium)
 
 State-Machine Flow:
   1. ensure_idle()  — 确认无活跃交易 / 关闭残留弹窗
@@ -9,8 +9,11 @@ State-Machine Flow:
   6. wait_for_result()           — 等结算 → 截图 → 关闭弹窗 → 回到 IDLE
 """
 import sys
+import os
 import re
 import time
+import gc
+import asyncio
 import argparse
 import json
 from pathlib import Path
@@ -38,7 +41,7 @@ def shot(page, name: str) -> str:
 # ═══════════════════════════════════════
 #  Loading 遮罩层处理
 # ═══════════════════════════════════════
-def wait_for_loading_gone(page, timeout_ms: int = 10000):
+def wait_for_loading_gone(page, timeout_ms: int = 5000):
     """等待 loading 遮罩层消失，超时后强制移除"""
     try:
         page.wait_for_function(
@@ -168,7 +171,17 @@ def _close_result_popup(page):
 #  Login
 # ═══════════════════════════════════════
 def login(page, context):
-    page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=TIMEOUT["navigation"])
+    # Connection retry: up to 3 attempts
+    for attempt in range(3):
+        try:
+            page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=TIMEOUT["navigation"])
+            break
+        except Exception as e:
+            if attempt < 2:
+                print(f"[login] Connection attempt {attempt + 1} failed: {e}, retrying...")
+                page.wait_for_timeout(3000)
+            else:
+                raise
     page.wait_for_timeout(DELAYS["page_load"])
 
     if page.locator('input[type="password"]').count() > 0:
@@ -179,7 +192,7 @@ def login(page, context):
         page.locator("button").filter(
             has_text=re.compile(r"log\s*in|login|sign", re.I)
         ).first.click()
-        page.wait_for_timeout(4000)
+        page.wait_for_timeout(2000)
         context.storage_state(path=str(AUTH_FILE))
         print("[login] Done")
     else:
@@ -188,10 +201,10 @@ def login(page, context):
     # 等待交易区域加载（up/down 按钮）
     try:
         page.get_by_role("button", name=re.compile(r"up|down", re.I)).first.wait_for(
-            state="visible", timeout=10000
+            state="visible", timeout=8000
         )
     except Exception:
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(1500)
 
 
 # ═══════════════════════════════════════
@@ -220,7 +233,10 @@ def select_currency(page, currency: str) -> bool:
             break
         
         # 方法2: 大小写不敏感匹配 - 尝试常见变体
-        variants = [display, display.upper(), display.lower(), display.capitalize()]
+        variants = list(dict.fromkeys([
+            display, display.upper(), display.lower(),
+            display.capitalize(), display.title(),
+        ]))
         matched = False
         for variant in variants:
             item = page.locator(f'.ant-select-item[title="{variant}"]')
@@ -400,7 +416,7 @@ def click_direction(page, direction: str) -> bool:
                 }}
             }}""", d)
 
-    page.wait_for_timeout(1100)
+    page.wait_for_timeout(500)
 
     # ── 验证进入 ACTIVE 状态（倒计时出现）──
     state = get_page_state(page)
@@ -416,7 +432,7 @@ def click_direction(page, direction: str) -> bool:
 #  Step 5: Wait for Result + Close
 # ═══════════════════════════════════════
 def wait_for_result(page, duration: str) -> dict:
-    wait_s = int(duration) + 20
+    wait_s = int(duration) + 8
     print(f"  [wait] Waiting up to {wait_s}s for settlement...")
 
     result = {"won": False, "profit": "", "details": ""}
@@ -459,12 +475,12 @@ def wait_for_result(page, duration: str) -> dict:
             print("  [result] Popup closed")
 
             # 确认回到 IDLE
-            page.wait_for_timeout(700)
+            page.wait_for_timeout(300)
             final = get_page_state(page)
             if final != "idle":
                 print(f"  [state] WARN: After close state={final}, retrying...")
                 _close_result_popup(page)
-                page.wait_for_timeout(700)
+                page.wait_for_timeout(300)
             return result
 
         page.wait_for_timeout(1000)
@@ -472,6 +488,28 @@ def wait_for_result(page, duration: str) -> dict:
     print("  [warn] Result popup timeout")
     shot(page, f"timeout-{int(time.time())}")
     return result
+
+
+def _safe_playwright():
+    """Launch sync_playwright with retry on WinError 10055 socket exhaustion."""
+    for attempt in range(3):
+        try:
+            # Force GC and close stale event loops before each attempt
+            gc.collect()
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    asyncio.set_event_loop(asyncio.new_event_loop())
+            except RuntimeError:
+                asyncio.set_event_loop(asyncio.new_event_loop())
+            return sync_playwright()
+        except OSError as e:
+            if "10055" in str(e) and attempt < 2:
+                print(f"[init] Socket buffer exhausted, retrying ({attempt+1}/3)...")
+                gc.collect()
+                time.sleep(3)
+            else:
+                raise
 
 
 # ═══════════════════════════════════════
@@ -490,7 +528,7 @@ def run(currency, amount, duration, direction, rounds):
     print(f"  Rounds   : {rounds}")
     print(f"{'='*40}\n")
 
-    with sync_playwright() as p:
+    with _safe_playwright() as p:
         browser = p.chromium.launch(
             headless=BROWSER["headless"],
             slow_mo=BROWSER["slow_mo"],
@@ -539,7 +577,7 @@ def run(currency, amount, duration, direction, rounds):
                 if r < rounds:
                     # 确保完全回到 IDLE 再开始下一轮
                     ensure_idle(page)
-                    page.wait_for_timeout(1000)
+                    page.wait_for_timeout(300)
 
             # ── Summary ──
             print(f"\n{'='*40}")
@@ -573,7 +611,7 @@ def run(currency, amount, duration, direction, rounds):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="OKXOption Desktop Trade")
+    parser = argparse.ArgumentParser(description="BPTrading Desktop Trade")
     parser.add_argument("--currency", default=TRADE_DEFAULTS["currency"])
     parser.add_argument("--amount", default=TRADE_DEFAULTS["amount"])
     parser.add_argument("--duration", default=TRADE_DEFAULTS["duration"])

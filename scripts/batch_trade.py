@@ -1,4 +1,4 @@
-"""Batch and scheduled OKXOption trade runner.
+"""Batch and scheduled BPTrading trade runner.
 
 Order line examples:
     BTC 60 down 60s desktop
@@ -175,7 +175,7 @@ def run_order(order: Order, trade_script: Path) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Batch OKXOption trade runner")
+    parser = argparse.ArgumentParser(description="Batch BPTrading trade runner")
     parser.add_argument("--orders-file", required=True, help="Path to an orders text file")
     args = parser.parse_args()
 

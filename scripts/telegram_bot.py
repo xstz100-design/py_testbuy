@@ -1,4 +1,4 @@
-"""Telegram long-polling worker for OKXOption trade execution.
+"""Telegram long-polling worker for BPTrading trade execution.
 
 Features:
     - Listens for Telegram bot messages via Bot API long polling.
@@ -93,9 +93,231 @@ def save_sessions():
 def get_session(chat_id: str) -> dict:
     """Get or create session state for a chat."""
     if chat_id not in CHAT_SESSION:
-        CHAT_SESSION[chat_id] = {"mode": "desktop", "delay": 0}
+        CHAT_SESSION[chat_id] = {
+            "mode": "desktop",
+            "delay": 0,
+            "accounts": [],
+            "active_account": 0,
+            "erc20": "",
+            "wd_method": "usdt",
+        }
         save_sessions()
+    else:
+        # Ensure existing sessions have new fields
+        s = CHAT_SESSION[chat_id]
+        changed = False
+        for key, default in [("accounts", []), ("active_account", 0), ("erc20", ""), ("wd_method", "usdt")]:
+            if key not in s:
+                s[key] = default
+                changed = True
+        if changed:
+            save_sessions()
     return CHAT_SESSION[chat_id]
+
+
+def _next_account_id(session: dict) -> int:
+    """Return next available account ID."""
+    existing_ids = [a["id"] for a in session.get("accounts", [])]
+    return max(existing_ids, default=0) + 1
+
+
+def _get_active_account(session: dict) -> Optional[dict]:
+    """Return the active account dict or None."""
+    aid = session.get("active_account", 0)
+    if aid == 0:
+        return None
+    for a in session.get("accounts", []):
+        if a["id"] == aid:
+            return a
+    return None
+
+
+def handle_account_command(chat_id: str, text: str) -> Optional[str]:
+    """Handle account management commands. Returns response message or None."""
+    text_stripped = text.strip()
+    text_lower = text_stripped.lower()
+    session = get_session(chat_id)
+
+    # add=ACCOUNT,pass=PASSWORD  (case-insensitive keys)
+    add_match = re.match(
+        r'^add\s*=\s*(.+?)\s*,\s*pass\s*=\s*(.+)$', text_stripped, re.I
+    )
+    if add_match:
+        acc_val = add_match.group(1).strip()
+        pwd_val = add_match.group(2).strip()
+        if not acc_val or not pwd_val:
+            return "Format: add=ACCOUNT,pass=PASSWORD"
+        # Check duplicate
+        for a in session["accounts"]:
+            if a["account"] == acc_val:
+                return f"Account '{acc_val}' already exists (ID: {a['id']})"
+        new_id = _next_account_id(session)
+        session["accounts"].append({"id": new_id, "account": acc_val, "password": pwd_val})
+        # Auto-activate if first account
+        if session["active_account"] == 0:
+            session["active_account"] = new_id
+        save_sessions()
+        active_mark = " (active)" if session["active_account"] == new_id else ""
+        return f"Account added\nID: {new_id}\nAccount: {acc_val}{active_mark}\nTotal: {len(session['accounts'])} account(s)"
+
+    # del=ACCOUNT_OR_ID
+    del_match = re.match(r'^del\s*=\s*(.+)$', text_stripped, re.I)
+    if del_match:
+        val = del_match.group(1).strip()
+        found = None
+        for a in session["accounts"]:
+            if str(a["id"]) == val or a["account"] == val:
+                found = a
+                break
+        if not found:
+            return f"Account '{val}' not found"
+        session["accounts"].remove(found)
+        if session["active_account"] == found["id"]:
+            session["active_account"] = session["accounts"][0]["id"] if session["accounts"] else 0
+        save_sessions()
+        return f"Deleted account: {found['account']} (ID: {found['id']})\nRemaining: {len(session['accounts'])} account(s)"
+
+    # acc=ACCOUNT_OR_ID  or  acc=0 (use default config account)
+    acc_match = re.match(r'^acc\s*=\s*(.+)$', text_stripped, re.I)
+    if acc_match:
+        val = acc_match.group(1).strip()
+        if val == "0":
+            session["active_account"] = 0
+            save_sessions()
+            return f"Switched to default config account ({config.ACCOUNT})"
+        found = None
+        for a in session["accounts"]:
+            if str(a["id"]) == val or a["account"] == val:
+                found = a
+                break
+        if not found:
+            return f"Account '{val}' not found. Use /accounts to see all."
+        session["active_account"] = found["id"]
+        save_sessions()
+        return f"Active account switched to: {found['account']} (ID: {found['id']})"
+
+    # /accounts or accounts
+    if text_lower in {"/accounts", "accounts"}:
+        accs = session.get("accounts", [])
+        if not accs:
+            lines = ["No accounts added.", f"Using default: {config.ACCOUNT}", "", "Add: add=ACCOUNT,pass=PASSWORD"]
+        else:
+            active_id = session.get("active_account", 0)
+            lines = [f"Accounts ({len(accs)}):"]
+            for a in accs:
+                mark = " ← active" if a["id"] == active_id else ""
+                lines.append(f"  {a['id']}. {a['account']}{mark}")
+            if active_id == 0:
+                lines.append(f"\nUsing default: {config.ACCOUNT}")
+            lines.append("\nSwitch: acc=ID or acc=ACCOUNT")
+            lines.append("Delete: del=ID or del=ACCOUNT")
+            lines.append("Default config: acc=0")
+        return "\n".join(lines)
+
+    return None
+
+
+def handle_withdraw_command(chat_id: str, text: str) -> Optional[str]:
+    """Handle withdrawal setting commands. Returns response message or None."""
+    text_stripped = text.strip()
+    text_lower = text_stripped.lower()
+    session = get_session(chat_id)
+
+    # erc20=ADDRESS
+    erc20_match = re.match(r'^erc20\s*=\s*(.+)$', text_stripped, re.I)
+    if erc20_match:
+        addr = erc20_match.group(1).strip()
+        if not addr:
+            return "text", "Format: erc20=YOUR_WALLET_ADDRESS"
+        session["erc20"] = addr
+        save_sessions()
+        return "text", f"ERC20 address set to: {addr}"
+
+    # wdmethod=usdt or wdmethod=bank
+    wd_method_match = re.match(r'^wdmethod\s*=\s*(usdt|bank)$', text_stripped, re.I)
+    if wd_method_match:
+        method = wd_method_match.group(1).lower()
+        session["wd_method"] = method
+        save_sessions()
+        return "text", f"Withdrawal method set to: {method}"
+
+    # wd=AMOUNT (execute withdrawal)
+    wd_match = re.match(r'^wd\s*=\s*(\d+(?:\.\d+)?)$', text_stripped, re.I)
+    if wd_match:
+        amount = wd_match.group(1)
+        erc20 = session.get("erc20", "")
+        wd_method = session.get("wd_method", "usdt")
+        if not erc20:
+            return "text", "No ERC20 address set. Use: erc20=YOUR_ADDRESS first."
+        # Get active account credentials
+        acc = _get_active_account(session)
+        if acc:
+            account = acc["account"]
+            password = acc["password"]
+        else:
+            account = config.ACCOUNT
+            password = config.PASSWORD
+        return "withdraw", _execute_withdraw(chat_id, amount, account, password, erc20, wd_method)
+
+    return None, None
+
+
+def _execute_withdraw(chat_id: str, amount: str, account: str, password: str,
+                      erc20: str, wd_method: str) -> tuple[str, Optional[Path]]:
+    """Execute a withdrawal via withdraw.py script. Returns (message, screenshot_path)."""
+    withdraw_script = ROOT_DIR / "withdraw.py"
+    if not withdraw_script.exists():
+        return "withdraw.py not found", None
+
+    command = [
+        sys.executable,
+        str(withdraw_script),
+        "--account", account,
+        "--password", password,
+        "--amount", amount,
+        "--erc20", erc20,
+        "--method", wd_method,
+    ]
+
+    start_time = time.time()
+    try:
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        proc = subprocess.run(
+            command,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=env, cwd=str(ROOT_DIR), timeout=120,
+        )
+        result = extract_result_from_output(proc.stdout)
+        # Find latest withdraw screenshot
+        shot = _latest_withdraw_screenshot(start_time)
+        if result and result.get("status") == "ok":
+            msg = (
+                f"Withdrawal submitted\n"
+                f"Amount: {amount}\n"
+                f"Method: {wd_method}\n"
+                f"Address: {erc20[:10]}...{erc20[-6:]}\n"
+                f"Message: {result.get('message', 'OK')}"
+            )
+            return msg, shot
+        err = (result or {}).get("message", proc.stdout[-300:] if proc.stdout else "Unknown error")
+        return f"Withdrawal failed\nError: {err}", shot
+    except subprocess.TimeoutExpired:
+        return "Withdrawal timeout (120s)", _latest_withdraw_screenshot(start_time)
+    except Exception as e:
+        return f"Withdrawal error: {e}", None
+
+
+def _latest_withdraw_screenshot(after_timestamp: float) -> Optional[Path]:
+    """Find the latest withdraw screenshot created after given timestamp."""
+    if not SCREENSHOT_DIR.exists():
+        return None
+    candidates = [
+        f for f in SCREENSHOT_DIR.glob("withdraw-*.png")
+        if f.is_file() and f.stat().st_mtime > after_timestamp
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda f: f.stat().st_mtime)
 
 
 def handle_setting_command(chat_id: str, text: str) -> Optional[str]:
@@ -128,7 +350,18 @@ def handle_setting_command(chat_id: str, text: str) -> Optional[str]:
     
     # Handle /settings or settings to show current settings
     if text_lower in {"/settings", "settings"}:
-        return f"Current settings:\n- Mode: {session['mode']}\n- Delay: {session['delay']}s"
+        acc = _get_active_account(session)
+        acc_display = acc["account"] if acc else f"{config.ACCOUNT} (default)"
+        erc20 = session.get("erc20", "") or "(not set)"
+        wd_method = session.get("wd_method", "usdt")
+        return (
+            f"Current settings:\n"
+            f"- Mode: {session['mode']}\n"
+            f"- Delay: {session['delay']}s\n"
+            f"- Account: {acc_display}\n"
+            f"- ERC20: {erc20}\n"
+            f"- WD Method: {wd_method}"
+        )
     
     return None
 
@@ -313,7 +546,9 @@ def format_queue_status() -> str:
 
 def get_help_text(session: dict) -> str:
     """Get help text with all commands."""
-    return f"""OKXOption Trading Bot
+    acc = _get_active_account(session)
+    acc_display = acc["account"] if acc else f"{config.ACCOUNT} (default)"
+    return f"""BPTrading Bot
 
 [Order Format]
   BTC 60 down 60s
@@ -327,6 +562,18 @@ def get_help_text(session: dict) -> str:
   delay=5 (pause 5s after each trade)
   /settings
 
+[Account Management]
+  add=ACCOUNT,pass=PASSWORD
+  del=ACCOUNT or del=ID
+  acc=ACCOUNT or acc=ID (switch)
+  acc=0 (use default config account)
+  /accounts - list all accounts
+
+[Withdrawal]
+  erc20=YOUR_WALLET_ADDRESS
+  wdmethod=usdt or wdmethod=bank
+  wd=AMOUNT (execute withdrawal)
+
 [Management]
   /health - system status
   /queue - view queue
@@ -337,7 +584,8 @@ def get_help_text(session: dict) -> str:
 
 [Current]
   Mode: {session['mode']}
-  Delay: {session['delay']}s"""
+  Delay: {session['delay']}s
+  Account: {acc_display}"""
 
 
 def handle_management_command(chat_id: str, text: str, message_id: int) -> bool:
@@ -408,7 +656,7 @@ def telegram_api(method: str, data: Optional[dict] = None, files: Optional[dict]
 
     url = f"{API_BASE}/{method}"
     if files:
-        boundary = f"okxbot-{int(time.time() * 1000)}"
+        boundary = f"bpbot-{int(time.time() * 1000)}"
         body = bytearray()
         fields = data or {}
         for key, value in fields.items():
@@ -662,6 +910,11 @@ def execute_single_order(order_text: str, chat_id: str) -> tuple[str, dict]:
         "--duration",
         order.duration,
     ]
+    # Use active account if set
+    session = get_session(chat_id)
+    acc = _get_active_account(session)
+    if acc:
+        command.extend(["--account", acc["account"], "--password", acc["password"]])
     # 单笔交易最多 5 分钟
     _, result = run_command(command, timeout=300)
     message = format_single_result(result, order_text)
@@ -734,6 +987,19 @@ def handle_task(task: TradeTask):
         send_message(task.chat_id, f"Trade failed\nError: {exc}", task.message_id)
 
 
+def _cleanup_old_screenshots():
+    """Delete all screenshots older than 1 hour to prevent accumulation."""
+    if not SCREENSHOT_DIR.exists():
+        return
+    cutoff = time.time() - 3600
+    for f in SCREENSHOT_DIR.glob("*.png"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+        except Exception:
+            pass
+
+
 def _send_result_with_screenshot(chat_id: str, message: str, result: dict, start_time: float):
     """Helper to send result message with screenshot."""
     shot = latest_screenshot(after_timestamp=start_time)
@@ -758,6 +1024,8 @@ def _send_result_with_screenshot(chat_id: str, message: str, result: dict, start
                 send_message(chat_id, message + "\n(No screenshot)")
         else:
             send_message(chat_id, message)
+    # Clean up old screenshots after each trade
+    _cleanup_old_screenshots()
 
 
 def worker_loop():
@@ -823,6 +1091,29 @@ def extract_text_from_update(update: dict) -> Optional[TradeTask]:
     if handle_management_command(chat_id, text, message_id):
         return None
     
+    # Check for account commands
+    account_response = handle_account_command(chat_id, text)
+    if account_response:
+        send_message(chat_id, account_response, message_id)
+        return None
+
+    # Check for withdrawal commands
+    wd_type, wd_response = handle_withdraw_command(chat_id, text)
+    if wd_type == "text":
+        send_message(chat_id, wd_response, message_id)
+        return None
+    elif wd_type == "withdraw":
+        msg, shot_path = wd_response
+        if shot_path and shot_path.exists():
+            send_photo(chat_id, shot_path, msg)
+            try:
+                shot_path.unlink()
+            except Exception:
+                pass
+        else:
+            send_message(chat_id, msg, message_id)
+        return None
+
     # Check for setting commands
     setting_response = handle_setting_command(chat_id, text)
     if setting_response:

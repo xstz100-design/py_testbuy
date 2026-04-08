@@ -1,10 +1,10 @@
-# OKXOption Trading Configuration
+# BPTrading Configuration
 # Copy this file to config.py and fill in your credentials
 
 ACCOUNT = "your_account"
 PASSWORD = "your_password"
-BASE_URL = "https://okxoption.com"
-TRADE_URL = "https://okxoption.com/#/trade"
+BASE_URL = "https://bptradinguk.com"
+TRADE_URL = "https://bptradinguk.com/#/trade"
 
 # Speed mode: "fast" = minimum delays, "normal" = safer delays
 SPEED_MODE = "fast"

@@ -1,4 +1,4 @@
-"""BPTrading Mobile Trade - Python + Playwright (Chromium iPhone Emulation)
+"""BPTrading UK Mobile Trade - Python + Playwright (Chromium iPhone Emulation)
 
 State-Machine Flow:
   1. desktop_login()   — Phase 1: Chromium 桌面登录 → 保存 session
@@ -11,11 +11,16 @@ State-Machine Flow:
   8. wait_for_result()           — 等结算 → 截图 → 关闭弹窗 → 回到 IDLE
 """
 import sys
+import io
 import os
+
+# Fix Windows console encoding for Unicode symbols
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 import re
 import time
-import gc
-import asyncio
 import argparse
 import json
 from pathlib import Path
@@ -56,12 +61,11 @@ def shot(page, name: str) -> str:
 # ═══════════════════════════════════════
 #  Loading 遮罩层处理
 # ═══════════════════════════════════════
-def wait_for_loading_gone(page, timeout_ms: int = 5000):
+def wait_for_loading_gone(page, timeout_ms: int = 10000):
     """等待 loading 遮罩层消失，超时后强制移除"""
     try:
         page.wait_for_function(
             """() => {
-                // 常见 loading 选择器
                 const selectors = ['.loading', '.loading-mask', '.ant-spin', 
                     '[class*="loading"]', '[class*="spinner"]', '.overlay'];
                 for (const sel of selectors) {
@@ -82,7 +86,6 @@ def wait_for_loading_gone(page, timeout_ms: int = 5000):
             timeout=timeout_ms,
         )
     except Exception:
-        # 强制移除 loading 遮罩
         page.evaluate("""() => {
             const selectors = ['.loading', '.loading-mask', '.ant-spin',
                 '[class*="loading"]', '[class*="spinner"]', '.overlay'];
@@ -199,39 +202,38 @@ def _dismiss_blocking_popup(page):
 # ═══════════════════════════════════════
 #  Phase 1: Desktop Login
 # ═══════════════════════════════════════
-def desktop_login(playwright):
+def desktop_login(playwright, account=None, password=None):
+    """Desktop login with specified or default credentials."""
+    use_account = account if account else ACCOUNT
+    use_password = password if password else PASSWORD
+    
     print("[phase1] Desktop login via Chromium...")
-    browser = playwright.chromium.launch(headless=True)
+    browser = playwright.chromium.launch(headless=True, args=["--remote-debugging-port=0"])
     ctx = browser.new_context(viewport={"width": 1440, "height": 900})
     page = ctx.new_page()
-
-    # Connection retry: up to 3 attempts
-    for attempt in range(3):
-        try:
-            page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=30000)
-            break
-        except Exception as e:
-            if attempt < 2:
-                print(f"  [conn] Attempt {attempt + 1} failed: {e}, retrying...")
-                page.wait_for_timeout(3000)
-            else:
-                raise
-    page.wait_for_timeout(2000)
+    page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(3000)
 
     if page.locator('input[type="password"]').count() > 0:
-        print("  [login] Filling credentials...")
+        print(f"  [login] Filling credentials for {use_account}...")
         inputs = page.locator("input")
-        inputs.nth(0).fill(ACCOUNT)
-        inputs.nth(1).fill(PASSWORD)
+        inputs.nth(0).fill(use_account)
+        inputs.nth(1).fill(use_password)
         page.locator("button").first.click()
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(5000)
         print("  [login] Done")
     else:
         print("  [login] Session valid")
 
-    ctx.storage_state(path=str(AUTH_FILE))
-    print(f"  [session] Saved to {AUTH_FILE}")
+    # Only save session for default account
+    if not account:
+        ctx.storage_state(path=str(AUTH_FILE))
+        print(f"  [session] Saved to {AUTH_FILE}")
+    ctx.close()
     browser.close()
+    # Allow OS to fully release browser ports before Phase 2
+    import time as _time
+    _time.sleep(2)
 
 
 # ═══════════════════════════════════════
@@ -260,7 +262,7 @@ def _on_response(response):
         print(f"  [net] Body snippet: {raw[:300]}")
         _network_settlement["raw"] = raw[:1000]
         _network_settlement["detected"] = True
-        # Parse result field: 1=win, 2=loss (BPTrading convention)
+        # Parse result field: 1=win, 2=loss (convention)
         msg = body.get("msg", {})
         result_code = msg.get("result")
         if result_code == 1:
@@ -275,33 +277,29 @@ def _on_response(response):
         pass
 
 
-def mobile_open(playwright):
+def mobile_open(playwright, account=None, password=None):
+    """Open mobile viewport with specified or default credentials."""
+    use_account = account if account else ACCOUNT
+    use_password = password if password else PASSWORD
+    
     global _network_settlement
     _network_settlement = {"detected": False, "won": None, "profit": "", "raw": ""}
     print("[phase2] Opening mobile viewport (iPhone emulation)...")
     browser = playwright.chromium.launch(
-        headless=BROWSER["headless"], slow_mo=BROWSER["slow_mo"],
+        headless=BROWSER["headless"], slow_mo=80,
+        args=["--remote-debugging-port=0"],
     )
+    # Only restore session for default account
+    storage = str(AUTH_FILE) if (not account and AUTH_FILE.exists()) else None
     ctx = browser.new_context(
         **IPHONE, locale="zh-CN",
-        storage_state=str(AUTH_FILE) if AUTH_FILE.exists() else None,
+        storage_state=storage,
     )
     page = ctx.new_page()
     # 注入脚本隐藏 webdriver 标记，防止被检测为自动化
     page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     page.on("response", _on_response)
-
-    # Connection retry: up to 3 attempts
-    for attempt in range(3):
-        try:
-            page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=45000)
-            break
-        except Exception as e:
-            if attempt < 2:
-                print(f"  [conn] Attempt {attempt + 1} failed: {e}, retrying...")
-                page.wait_for_timeout(3000)
-            else:
-                raise
+    page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=45000)
 
     # 等待页面元素出现
     try:
@@ -318,7 +316,7 @@ def mobile_open(playwright):
                 or page.get_by_text("Log In", exact=True).count() > 0)
 
     if is_login:
-        print("  [warn] Login required")
+        print(f"  [warn] Login required as {use_account}")
         try:
             page.locator('input[type="password"]').wait_for(
                 state="visible", timeout=10000)
@@ -328,23 +326,23 @@ def mobile_open(playwright):
 
         inputs = page.locator("input")
         if inputs.count() >= 2:
-            inputs.nth(0).fill(ACCOUNT)
-            inputs.nth(1).fill(PASSWORD)
+            inputs.nth(0).fill(use_account)
+            inputs.nth(1).fill(use_password)
         elif inputs.count() == 1:
-            inputs.nth(0).fill(ACCOUNT)
+            inputs.nth(0).fill(use_account)
             page.wait_for_timeout(1000)
             pwd = page.locator('input[type="password"]')
             if pwd.count() > 0:
-                pwd.first.fill(PASSWORD)
+                pwd.first.fill(use_password)
 
         page.evaluate("""() => {
             const btn = document.querySelector('.loginbtm')
                      || document.querySelector('button');
             if (btn) btn.click();
         }""")
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(5000)
         page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=45000)
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(4000)
         print("  [login] Mobile login completed")
     else:
         print("  [session] Session valid")
@@ -360,12 +358,41 @@ def close_market_popup(page):
 
 
 # ═══════════════════════════════════════
+#  Name Normalization for Space-Containing Assets
+# ═══════════════════════════════════════
+def normalize_name(name: str) -> str:
+    """Normalize currency name for comparison (remove spaces/newlines, lowercase)."""
+    return re.sub(r'\s+', '', name).lower()
+
+
+def generate_name_variants(name: str) -> list:
+    """Generate common variants of a currency name for matching."""
+    variants = [
+        name,                           # Original: "Crude Oil"
+        name.upper(),                   # "CRUDE OIL"
+        name.lower(),                   # "crude oil"
+        name.title(),                   # "Crude Oil"
+        name.replace(" ", ""),          # "CrudeOil"
+        name.replace(" ", "\n"),        # "Crude\nOil"
+    ]
+    # Also handle underscores and hyphens
+    if "_" in name:
+        variants.append(name.replace("_", " "))
+        variants.append(name.replace("_", ""))
+    if "-" in name:
+        variants.append(name.replace("-", " "))
+        variants.append(name.replace("-", ""))
+    return list(dict.fromkeys(variants))  # Remove duplicates, keep order
+
+
+# ═══════════════════════════════════════
 #  Step 1: Select Currency + Verify
 # ═══════════════════════════════════════
 def select_currency(page, currency: str) -> bool:
     display = get_display(currency)
     category = get_category(currency)
-    print(f"  [currency] Selecting {display} ({category})...")
+    normalized_target = normalize_name(display)
+    print(f"  [currency] Selecting {display} ({category}, normalized: {normalized_target})...")
 
     close_market_popup(page)
 
@@ -374,15 +401,6 @@ def select_currency(page, currency: str) -> bool:
     page.wait_for_timeout(DELAYS["popup_check"])
     page.reload(wait_until="domcontentloaded", timeout=45000)
     page.wait_for_timeout(DELAYS["page_load"])
-
-    # 等待交易列表或关键元素出现（避免 splash 页未消失就操作）
-    try:
-        page.locator(".list-title, .down-btn, .up-btn, .van-overlay, span").first.wait_for(
-            state="visible", timeout=15000
-        )
-    except Exception:
-        page.wait_for_timeout(5000)
-
     # 滚动到页面顶部，确保从 Cryptocurrency Trade 开始
     page.evaluate("() => { (document.scrollingElement || document.body).scrollTo(0, 0); }")
     page.wait_for_timeout(DELAYS["input_verify"])
@@ -410,7 +428,7 @@ def select_currency(page, currency: str) -> bool:
                 }
             }
         }""", tab_map.get(category, [category]))
-        page.wait_for_timeout(800)
+        page.wait_for_timeout(1200)
 
     # 找到并点击币种行
     navigated = False
@@ -424,14 +442,10 @@ def select_currency(page, currency: str) -> bool:
         });
         window.scrollTo(0, 0);
     }""")
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(800)
 
-    # 大小写不敏感：尝试多种变体 e.g. ["BTC", "btc", "Btc"]
-    search_texts = list(dict.fromkeys([
-        display, display.upper(), display.lower(),
-        display.capitalize(), display.title(),
-        currency.upper(), currency.lower(), currency.title(),
-    ]))
+    # 智能匹配：支持带空格的资产名称（如 "Crude Oil", "Brent Oil"）
+    search_variants = generate_name_variants(display)
     for attempt in range(12):
         if attempt == 0:
             close_market_popup(page)
@@ -439,7 +453,8 @@ def select_currency(page, currency: str) -> bool:
         for el in spans:
             try:
                 text = el.text_content().strip()
-                if text not in search_texts:
+                # 使用 normalize_name 进行匹配，支持带空格的资产名称
+                if normalize_name(text) != normalized_target and text not in search_variants:
                     continue
                 box = el.bounding_box()
                 if box and box["height"] > 20 and box["y"] >= 0:
@@ -459,7 +474,7 @@ def select_currency(page, currency: str) -> bool:
                 c.scrollBy({{top: {direction}, behavior: 'smooth'}});
                 window.scrollBy({{top: {direction}, behavior: 'smooth'}});
             }}""")
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(700)
 
     if not navigated:
         print(f"  [currency] FAIL: {display} not found in market list")
@@ -467,22 +482,36 @@ def select_currency(page, currency: str) -> bool:
 
     print(f"  [currency] Tapped {display}")
 
-    # ── 验证跳转到 chart 页面 ──
+    # Wait for navigation to start and complete
+    page.wait_for_timeout(1500)
+    
+    # Wait for page load state
     try:
-        page.wait_for_url(re.compile(r"#/chart"), timeout=10000)
+        page.wait_for_load_state("domcontentloaded", timeout=15000)
     except Exception:
-        print(f"  [currency] FAIL: Did not navigate to chart page")
-        return False
+        pass
+    
+    page.wait_for_timeout(2000)
+    
+    # Wait for any loading overlays to disappear
+    wait_for_loading_gone(page)
 
-    # ── 验证交易面板加载完成 ──
-    try:
-        page.locator(".amount-btn, .amount-box, .down-btn, .up-btn").first \
-            .wait_for(state="visible", timeout=15000)
-    except Exception:
+    # Verify trade panel loaded (check multiple times for stability)
+    panel_visible = False
+    for _ in range(3):
+        try:
+            page.locator(".amount-btn, .amount-box, .down-btn, .up-btn").first \
+                .wait_for(state="visible", timeout=5000)
+            panel_visible = True
+            break
+        except Exception:
+            page.wait_for_timeout(1000)
+    
+    if not panel_visible:
         print(f"  [currency] FAIL: Trade panel not loaded")
         return False
 
-    page.wait_for_timeout(400)
+    page.wait_for_timeout(1000)
     print(f"  [currency] ✓ Trade panel loaded for {display}")
     return True
 
@@ -493,8 +522,6 @@ def select_currency(page, currency: str) -> bool:
 def enter_amount(page, amount: str) -> bool:
     print(f"  [amount] Setting {amount}...")
 
-    # Wait for page to be stable before interacting
-    page.wait_for_timeout(500)
     close_market_popup(page)
     wait_for_loading_gone(page)
 
@@ -567,7 +594,7 @@ def select_duration(page, duration: str) -> bool:
     if selected == "no-popup":
         # 重试一次
         tc.tap()
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1500)
         selected = page.evaluate("""(target) => {
             const popup = document.querySelector('.time-pop');
             if (!popup) return 'no-popup';
@@ -579,7 +606,7 @@ def select_duration(page, duration: str) -> bool:
             return 'not-found';
         }""", dur_text)
 
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(700)
     time_display = page.locator(".time-content .time, .time-content").first \
         .text_content().strip()
     if duration in time_display:
@@ -617,7 +644,7 @@ def click_direction(page, direction: str):
             print(f"  [direction] FAIL: {direction.upper()} button not found")
             return 0.0
 
-    page.wait_for_timeout(800)
+    page.wait_for_timeout(1300)
 
     # ── 验证进入 ACTIVE 状态 ──
     state = get_page_state(page)
@@ -709,7 +736,6 @@ def _install_settlement_observer(page):
 
 
 # ═══════════════════════════════════════
-# ═══════════════════════════════════════
 #  Step 5: Wait for Result + Close
 # ═══════════════════════════════════════
 def _read_balance(page) -> float:
@@ -796,8 +822,8 @@ def wait_for_result(page, duration: str, r: int, trade_start: float) -> dict:
 
     result = {"won": False, "profit": "", "texts": ""}
 
-    # Wait until expiry + 5 seconds for settlement (total = duration + ~8s from click)
-    wait_until = expiry_at + 5.0
+    # Wait until expiry + a few seconds for settlement
+    wait_until = expiry_at + 3.0
     while time.time() < wait_until:
         # Check network settlement early
         if _network_settlement["detected"]:
@@ -807,8 +833,8 @@ def wait_for_result(page, duration: str, r: int, trade_start: float) -> dict:
         remaining = wait_until - time.time()
         time.sleep(min(0.5, max(0, remaining)))
 
-    # Brief pause for balance update
-    time.sleep(1)
+    # Wait a bit more for balance to update
+    time.sleep(2)
 
     final_balance = _read_balance(page)
 
@@ -837,15 +863,13 @@ def wait_for_result(page, duration: str, r: int, trade_start: float) -> dict:
         texts = f"balance: {initial_balance}->{final_balance}"
     else:
         # Last resort: navigate fresh to get updated balance
-        print("  [settle] No result detected — reading balance...")
+        print("  [settle] No result detected — navigating fresh for balance...")
+        try:
+            page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(3000)
+        except Exception as e:
+            print(f"  [warn] Navigation error: {e}")
         final_balance = _read_balance(page)
-        if not final_balance:
-            try:
-                page.reload(wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_timeout(2000)
-            except Exception as e:
-                print(f"  [warn] Reload error: {e}")
-            final_balance = _read_balance(page)
         shot(page, f"trade-result-final-r{r}")
         if initial_balance and final_balance and abs(final_balance - initial_balance) > 0.1:
             won = final_balance > initial_balance
@@ -868,49 +892,28 @@ def wait_for_result(page, duration: str, r: int, trade_start: float) -> dict:
     return result
 
 
-def _safe_playwright():
-    """Launch sync_playwright with retry on WinError 10055 socket exhaustion."""
-    for attempt in range(3):
-        try:
-            gc.collect()
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
-                    asyncio.set_event_loop(asyncio.new_event_loop())
-            except RuntimeError:
-                asyncio.set_event_loop(asyncio.new_event_loop())
-            return sync_playwright()
-        except OSError as e:
-            if "10055" in str(e) and attempt < 2:
-                print(f"[init] Socket buffer exhausted, retrying ({attempt+1}/3)...")
-                gc.collect()
-                time.sleep(3)
-            else:
-                raise
-
-
-def run(currency, amount, duration, direction, rounds):
+def run(currency, amount, duration, direction, rounds, account=None, password=None):
     display = get_display(currency)
 
     print(f"\n{'='*40}")
-    print(f"  Mobile Trade (Python + Chrome)")
+    print(f"  BPTrading UK Mobile Trade (Python + Chrome)")
     print(f"  Currency : {display}")
     print(f"  Amount   : {amount}")
     print(f"  Duration : {duration}s")
     print(f"  Direction: {direction.upper()}")
     print(f"  Rounds   : {rounds}")
+    if account:
+        print(f"  Account  : {account}")
     print(f"{'='*40}\n")
 
-    with _safe_playwright() as p:
-        browser = None
-        ctx = None
-        page = None
+    try:
+      with sync_playwright() as p:
+        desktop_login(p, account=account, password=password)
+        browser, ctx, page = mobile_open(p, account=account, password=password)
+
         MAX_RETRIES = 3
         results = []
         try:
-            desktop_login(p)
-            browser, ctx, page = mobile_open(p)
-
             for r in range(1, rounds + 1):
                 print(f"\n=== Round {r}/{rounds}: "
                       f"{display} {amount} {direction.upper()} "
@@ -963,7 +966,7 @@ def run(currency, amount, duration, direction, rounds):
 
                 if r < rounds:
                     ensure_idle(page)
-                    page.wait_for_timeout(300)
+                    page.wait_for_timeout(1000)
 
             # ── Summary ──
             print(f"\n{'='*40}")
@@ -986,20 +989,25 @@ def run(currency, amount, duration, direction, rounds):
             print("===END===")
         except Exception as e:
             print(f"\n[error] {e}")
-            if page:
+            try:
                 shot(page, "error")
+            except Exception:
+                pass
             print("===RESULT===")
             print(json.dumps({"status": "error", "message": str(e)}))
             print("===END===")
         finally:
-            if ctx:
-                ctx.close()
-            if browser:
-                browser.close()
+            ctx.close()
+            browser.close()
+    except Exception as e:
+        print(f"\n[fatal] {e}")
+        print("===RESULT===")
+        print(json.dumps({"status": "error", "message": str(e)}))
+        print("===END===")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="BPTrading Mobile Trade")
+    parser = argparse.ArgumentParser(description="BPTrading UK Mobile Trade")
     parser.add_argument("--currency", default=TRADE_DEFAULTS["currency"])
     parser.add_argument("--amount", default=TRADE_DEFAULTS["amount"])
     parser.add_argument("--duration", default=TRADE_DEFAULTS["duration"])

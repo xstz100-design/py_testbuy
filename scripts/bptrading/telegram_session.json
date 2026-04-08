@@ -1,0 +1,16 @@
+{
+  "7595498982": {
+    "mode": "mobile",
+    "delay": 0,
+    "accounts": [
+      {
+        "id": 1,
+        "account": "33334444",
+        "password": "123456"
+      }
+    ],
+    "active_account": 1,
+    "erc20": "",
+    "wd_method": "usdt"
+  }
+}

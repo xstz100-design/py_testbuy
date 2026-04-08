@@ -1,4 +1,4 @@
-"""OKXOption Trade - Unified Entry Point.
+"""BPTrading Trade - Unified Entry Point.
 
 Runs a single trade on either desktop or mobile.
 
@@ -16,7 +16,7 @@ from config import TRADE_DEFAULTS
 
 
 def main():
-    parser = argparse.ArgumentParser(description="OKXOption Trade")
+    parser = argparse.ArgumentParser(description="BPTrading Trade")
     parser.add_argument("--mode", choices=["desktop", "mobile"], default="desktop",
                         help="desktop or mobile")
     parser.add_argument("--currency", default=TRADE_DEFAULTS["currency"])
@@ -24,6 +24,8 @@ def main():
     parser.add_argument("--duration", default=TRADE_DEFAULTS["duration"])
     parser.add_argument("--direction", default=TRADE_DEFAULTS["direction"])
     parser.add_argument("--rounds", type=int, default=1)
+    parser.add_argument("--account", default=None, help="Override account")
+    parser.add_argument("--password", default=None, help="Override password")
     args = parser.parse_args()
 
     # Normalize direction to lowercase
@@ -31,6 +33,14 @@ def main():
     if direction not in {"up", "down"}:
         print(f"Invalid direction: {args.direction}. Must be 'up' or 'down'.")
         sys.exit(1)
+
+    # Override config account/password if provided
+    if args.account is not None:
+        import config as _cfg
+        _cfg.ACCOUNT = args.account
+    if args.password is not None:
+        import config as _cfg
+        _cfg.PASSWORD = args.password
 
     if args.mode == "desktop":
         from desktop.trader import run

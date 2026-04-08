@@ -6,11 +6,11 @@
  */
 module.exports = {
   // 网站地址
-  baseUrl: 'https://okxoption.com',
-  tradeUrl: 'https://okxoption.com/#/trade',
+  baseUrl: 'https://bptradinguk.com',
+  tradeUrl: 'https://bptradinguk.com/#/trade',
 
   // 登录凭据
-  account: process.env.OKX_ACCOUNT || '885236645',
+  account: process.env.OKX_ACCOUNT || '33334444',
   password: process.env.OKX_PASSWORD || '123456',
 
   // 浏览器设置

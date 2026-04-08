@@ -25,7 +25,10 @@ except ImportError:
     HAS_PSUTIL = False
 
 ROOT_DIR = Path(__file__).resolve().parent
-SCREENSHOT_DIR = ROOT_DIR / "screenshots"
+SCREENSHOT_DIRS = [
+    ROOT_DIR / "screenshots",
+    ROOT_DIR / "bptrading" / "screenshots",
+]
 LOG_FILES = [
     ROOT_DIR / "watchdog.log",
     ROOT_DIR / "bot.log",
@@ -84,21 +87,20 @@ def rotate_log(log_path: Path, max_bytes: int, backup_count: int):
 
 
 def cleanup_old_screenshots(retention_days: int):
-    """Delete screenshots older than retention_days."""
-    if not SCREENSHOT_DIR.exists():
-        return
-    
-    cutoff = datetime.now() - timedelta(days=retention_days)
+    """Delete screenshots older than retention_days from all screenshot directories."""
     deleted = 0
     freed = 0
     
-    for f in SCREENSHOT_DIR.glob("*.png"):
-        age = get_file_age_days(f)
-        if age > retention_days:
-            size = f.stat().st_size
-            f.unlink()
-            deleted += 1
-            freed += size
+    for screenshot_dir in SCREENSHOT_DIRS:
+        if not screenshot_dir.exists():
+            continue
+        for f in screenshot_dir.glob("*.png"):
+            age = get_file_age_days(f)
+            if age > retention_days:
+                size = f.stat().st_size
+                f.unlink()
+                deleted += 1
+                freed += size
     
     if deleted > 0:
         print(f"Deleted {deleted} old screenshots ({freed / 1024 / 1024:.1f} MB)")
@@ -107,17 +109,28 @@ def cleanup_old_screenshots(retention_days: int):
 
 
 def cleanup_temp_files():
-    """Clean up orphaned temp files."""
-    patterns = ["tmp*.txt", "*.tmp"]
+    """Clean up orphaned temp files and pycache."""
     deleted = 0
+    freed = 0
+    # Temp files
+    patterns = ["tmp*.txt", "*.tmp"]
     for pattern in patterns:
         for f in ROOT_DIR.glob(pattern):
             age = get_file_age_days(f)
-            if age > 1:  # Older than 1 day
+            if age > 0.04:  # Older than ~1 hour
+                freed += f.stat().st_size
+                f.unlink()
+                deleted += 1
+    # __pycache__ cleanup
+    for cache_dir in ROOT_DIR.rglob("__pycache__"):
+        for f in cache_dir.glob("*.pyc"):
+            age = get_file_age_days(f)
+            if age > 1:
+                freed += f.stat().st_size
                 f.unlink()
                 deleted += 1
     if deleted > 0:
-        print(f"Deleted {deleted} temp files")
+        print(f"Deleted {deleted} temp/cache files ({freed / 1024:.1f} KB)")
 
 
 def get_system_status() -> dict:
@@ -157,10 +170,15 @@ def get_system_status() -> dict:
         status["python_total_memory_mb"] = sum(p["memory_mb"] for p in python_procs)
     
     # Screenshots
-    if SCREENSHOT_DIR.exists():
-        screenshots = list(SCREENSHOT_DIR.glob("*.png"))
-        status["screenshot_count"] = len(screenshots)
-        status["screenshot_size_mb"] = sum(f.stat().st_size for f in screenshots) / 1024 / 1024
+    total_count = 0
+    total_size = 0
+    for screenshot_dir in SCREENSHOT_DIRS:
+        if screenshot_dir.exists():
+            screenshots = list(screenshot_dir.glob("*.png"))
+            total_count += len(screenshots)
+            total_size += sum(f.stat().st_size for f in screenshots)
+    status["screenshot_count"] = total_count
+    status["screenshot_size_mb"] = total_size / 1024 / 1024
     
     # Logs
     for log_path in LOG_FILES:
@@ -175,7 +193,7 @@ def print_status():
     status = get_system_status()
     
     print("\n" + "=" * 50)
-    print("  OKXOption Bot System Status")
+    print("  BPTrading Bot System Status")
     print("=" * 50)
     print(f"  Time: {status['timestamp']}")
     

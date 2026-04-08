@@ -18,7 +18,16 @@ ROOT_DIR = Path(__file__).resolve().parent
 BOT_SCRIPT = ROOT_DIR / "telegram_bot.py"
 MAINTENANCE_SCRIPT = ROOT_DIR / "maintenance.py"
 LOG_FILE = ROOT_DIR / "watchdog.log"
-PYTHON_EXE = sys.executable
+
+# Prefer .venv Python over system/anaconda Python
+_VENV_PYTHON_WIN = ROOT_DIR.parent / ".venv" / "Scripts" / "python.exe"
+_VENV_PYTHON_UNIX = ROOT_DIR.parent / ".venv" / "bin" / "python3"
+if _VENV_PYTHON_WIN.exists():
+    PYTHON_EXE = str(_VENV_PYTHON_WIN)
+elif _VENV_PYTHON_UNIX.exists():
+    PYTHON_EXE = str(_VENV_PYTHON_UNIX)
+else:
+    PYTHON_EXE = sys.executable
 
 # Restart settings
 MIN_RESTART_INTERVAL = 10  # Minimum seconds between restarts
@@ -26,7 +35,7 @@ MAX_RESTART_INTERVAL = 300  # Max backoff
 RESET_AFTER_STABLE = 300  # Reset backoff after running this long without crash
 
 # Maintenance settings
-MAINTENANCE_INTERVAL = 3600  # Run maintenance every hour
+MAINTENANCE_INTERVAL = 1800  # Run maintenance every 30 minutes
 HEALTH_CHECK_INTERVAL = 300  # Check health every 5 minutes
 
 _last_maintenance = time.time()

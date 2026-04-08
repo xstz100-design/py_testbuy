@@ -17,7 +17,7 @@ if (!fs.existsSync(SHOT_DIR)) {
 async function run() {
   console.log('🦞 ============================');
   console.log('   OpenClaw 龙虾精准钳控');
-  console.log('   目标: okxoption.com');
+  console.log('   目标: bptradinguk.com');
   console.log('   ============================\n');
 
   const browser = await chromium.launch({
