@@ -285,17 +285,18 @@ def _execute_withdraw(chat_id: str, amount: str, account: str, password: str,
         "--method", wd_method,
     ]
 
+    worker = get_worker(chat_id)
     start_time = time.time()
     try:
-        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        env = dict(os.environ, PYTHONIOENCODING="utf-8",
+                   BP_SCREENSHOT_DIR=str(worker.screenshot_dir))
         proc = subprocess.run(
             command,
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             env=env, cwd=str(ROOT_DIR), timeout=120,
         )
         result = extract_result_from_output(proc.stdout)
-        # Find latest withdraw screenshot
-        shot = _latest_withdraw_screenshot(start_time)
+        shot = worker.latest_withdraw_screenshot(start_time)
         if result and result.get("status") == "ok":
             msg = (
                 f"Withdrawal submitted\n"
@@ -308,22 +309,10 @@ def _execute_withdraw(chat_id: str, amount: str, account: str, password: str,
         err = (result or {}).get("message", proc.stdout[-300:] if proc.stdout else "Unknown error")
         return f"Withdrawal failed\nError: {err}", shot
     except subprocess.TimeoutExpired:
-        return "Withdrawal timeout (120s)", _latest_withdraw_screenshot(start_time)
+        worker = get_worker(chat_id)
+        return "Withdrawal timeout (120s)", worker.latest_withdraw_screenshot(start_time)
     except Exception as e:
         return f"Withdrawal error: {e}", None
-
-
-def _latest_withdraw_screenshot(after_timestamp: float) -> Optional[Path]:
-    """Find the latest withdraw screenshot created after given timestamp."""
-    if not SCREENSHOT_DIR.exists():
-        return None
-    candidates = [
-        f for f in SCREENSHOT_DIR.glob("withdraw-*.png")
-        if f.is_file() and f.stat().st_mtime > after_timestamp
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda f: f.stat().st_mtime)
 
 
 def handle_setting_command(chat_id: str, text: str) -> Optional[str]:
@@ -393,160 +382,471 @@ class TradeTask:
     created_at: float = field(default_factory=time.time)
 
 
-# Global queue management
-TASK_QUEUE: queue.Queue = queue.Queue()
-TASK_LIST: List[TradeTask] = []  # Shadow list for queue inspection
-TASK_LIST_LOCK = threading.Lock()
-TASK_COUNTER = 0
-CURRENT_TASK: Optional[TradeTask] = None
-CURRENT_PROCESS: Optional[subprocess.Popen] = None
-STOP_CURRENT_FLAG = threading.Event()
+# Global task ID counter (unique across all users)
+_TASK_COUNTER = 0
+_TASK_COUNTER_LOCK = threading.Lock()
 BOT_START_TIME = time.time()
 
 
-def get_next_task_id() -> int:
-    global TASK_COUNTER
-    TASK_COUNTER += 1
-    return TASK_COUNTER
+def _next_task_id() -> int:
+    global _TASK_COUNTER
+    with _TASK_COUNTER_LOCK:
+        _TASK_COUNTER += 1
+        return _TASK_COUNTER
 
 
-def add_task_to_queue(task: TradeTask) -> int:
-    """Add task to queue and return its position."""
-    task.task_id = get_next_task_id()
-    with TASK_LIST_LOCK:
-        TASK_LIST.append(task)
-        TASK_QUEUE.put(task)
-        return len(TASK_LIST)
+class UserWorker:
+    """Per-user execution context: own queue, worker thread, screenshot dir."""
 
+    def __init__(self, chat_id: str):
+        self.chat_id = chat_id
+        self.task_queue: queue.Queue = queue.Queue()
+        self.task_list: List[TradeTask] = []
+        self.task_list_lock = threading.Lock()
+        self.current_task: Optional[TradeTask] = None
+        self.current_process: Optional[subprocess.Popen] = None
+        self.stop_flag = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+        self.screenshot_dir = SCREENSHOT_DIR / chat_id
+        self.screenshot_dir.mkdir(parents=True, exist_ok=True)
 
-def remove_task_from_list(task: TradeTask):
-    """Remove task from shadow list when completed."""
-    with TASK_LIST_LOCK:
-        if task in TASK_LIST:
-            TASK_LIST.remove(task)
+    def ensure_worker_running(self):
+        if self.thread is None or not self.thread.is_alive():
+            self.thread = threading.Thread(
+                target=self._worker_loop, daemon=True,
+                name=f"worker-{self.chat_id}",
+            )
+            self.thread.start()
 
+    def add_task(self, task: TradeTask) -> int:
+        task.task_id = _next_task_id()
+        with self.task_list_lock:
+            self.task_list.append(task)
+            self.task_queue.put(task)
+            return len(self.task_list)
 
-def get_queue_info() -> List[dict]:
-    """Get info about all tasks in queue."""
-    with TASK_LIST_LOCK:
-        result = []
-        for i, task in enumerate(TASK_LIST):
-            result.append({
-                "position": i + 1,
-                "task_id": task.task_id,
-                "text": task.text[:50] + ("..." if len(task.text) > 50 else ""),
-                "age": int(time.time() - task.created_at),
-            })
-        return result
+    def remove_task(self, task: TradeTask):
+        with self.task_list_lock:
+            if task in self.task_list:
+                self.task_list.remove(task)
 
+    def get_queue_info(self) -> List[dict]:
+        with self.task_list_lock:
+            return [
+                {
+                    "position": i + 1,
+                    "task_id": t.task_id,
+                    "text": t.text[:50] + ("..." if len(t.text) > 50 else ""),
+                    "age": int(time.time() - t.created_at),
+                }
+                for i, t in enumerate(self.task_list)
+            ]
 
-def cancel_task_by_position(position: int) -> Optional[TradeTask]:
-    """Cancel task at given position (1-based). Returns cancelled task or None."""
-    with TASK_LIST_LOCK:
-        if position < 1 or position > len(TASK_LIST):
-            return None
-        task = TASK_LIST.pop(position - 1)
-        # Note: Cannot remove from queue.Queue, but worker will skip cancelled tasks
-        return task
+    def cancel_task(self, position: int) -> Optional[TradeTask]:
+        with self.task_list_lock:
+            if position < 1 or position > len(self.task_list):
+                return None
+            return self.task_list.pop(position - 1)
 
+    def clear_queue(self) -> int:
+        with self.task_list_lock:
+            count = len(self.task_list)
+            self.task_list.clear()
+            while not self.task_queue.empty():
+                try:
+                    self.task_queue.get_nowait()
+                    self.task_queue.task_done()
+                except queue.Empty:
+                    break
+            return count
 
-def clear_all_queue() -> int:
-    """Clear all pending tasks. Returns count of cleared tasks."""
-    with TASK_LIST_LOCK:
-        count = len(TASK_LIST)
-        TASK_LIST.clear()
-        # Drain the queue
-        while not TASK_QUEUE.empty():
+    def stop_current(self) -> bool:
+        self.stop_flag.set()
+        if self.current_process is not None:
             try:
-                TASK_QUEUE.get_nowait()
-                TASK_QUEUE.task_done()
-            except queue.Empty:
-                break
-        return count
+                self.current_process.terminate()
+                time.sleep(0.5)
+                if self.current_process.poll() is None:
+                    self.current_process.kill()
+                return True
+            except Exception:
+                pass
+        return self.current_task is not None
 
+    def format_queue_status(self) -> str:
+        info = self.get_queue_info()
+        if not info:
+            if self.current_task:
+                return f"Queue: empty\nRunning: {self.current_task.text}"
+            return "Queue: empty\nStatus: Idle"
+        lines = [f"Queue ({len(info)} pending):"]
+        if self.current_task:
+            lines.append(f"Running: {self.current_task.text[:40]}...")
+        lines.append("")
+        for item in info[:10]:
+            lines.append(
+                f"{item['position']}. [#{item['task_id']}] {item['text']} ({item['age']}s ago)"
+            )
+        if len(info) > 10:
+            lines.append(f"... and {len(info) - 10} more")
+        return "\n".join(lines)
 
-def stop_current_task() -> bool:
-    """Stop the currently executing task. Returns True if there was a task to stop."""
-    global CURRENT_PROCESS
-    STOP_CURRENT_FLAG.set()
-    if CURRENT_PROCESS is not None:
+    # ── Screenshot helpers ──
+
+    def latest_screenshot(self, after_timestamp: Optional[float] = None) -> Optional[Path]:
+        if not self.screenshot_dir.exists():
+            return None
+        candidates = [p for p in self.screenshot_dir.glob("*.png") if p.is_file()]
+        if not candidates:
+            return None
+        if after_timestamp is not None:
+            candidates = [p for p in candidates if p.stat().st_mtime > after_timestamp]
+            if not candidates:
+                return None
+        return max(candidates, key=lambda f: f.stat().st_mtime)
+
+    def latest_withdraw_screenshot(self, after_timestamp: float) -> Optional[Path]:
+        if not self.screenshot_dir.exists():
+            return None
+        candidates = [
+            f for f in self.screenshot_dir.glob("withdraw-*.png")
+            if f.is_file() and f.stat().st_mtime > after_timestamp
+        ]
+        return max(candidates, key=lambda f: f.stat().st_mtime) if candidates else None
+
+    def cleanup_old_screenshots(self):
+        if not self.screenshot_dir.exists():
+            return
+        cutoff = time.time() - 3600
+        for f in self.screenshot_dir.glob("*.png"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except Exception:
+                pass
+
+    # ── Command execution ──
+
+    def run_command(self, command: list[str], timeout: int = 600) -> tuple:
+        print(f"[execute][{self.chat_id}] Running: {' '.join(command)}")
+        env = dict(os.environ, PYTHONIOENCODING="utf-8",
+                   BP_SCREENSHOT_DIR=str(self.screenshot_dir))
+        self.stop_flag.clear()
         try:
-            CURRENT_PROCESS.terminate()
-            time.sleep(0.5)
-            if CURRENT_PROCESS.poll() is None:
-                CURRENT_PROCESS.kill()
-            return True
-        except Exception:
-            pass
-    return CURRENT_TASK is not None
+            self.current_process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                cwd=str(ROOT_DIR),
+            )
+            start_time = time.time()
+            stdout_chunks: list[str] = []
+            stderr_chunks: list[str] = []
+
+            def _read_stdout():
+                for line in self.current_process.stdout:
+                    stdout_chunks.append(line)
+
+            def _read_stderr():
+                for line in self.current_process.stderr:
+                    stderr_chunks.append(line)
+
+            t_out = threading.Thread(target=_read_stdout, daemon=True)
+            t_err = threading.Thread(target=_read_stderr, daemon=True)
+            t_out.start()
+            t_err.start()
+
+            while True:
+                if self.stop_flag.is_set():
+                    print(f"[execute][{self.chat_id}] Stop signal received")
+                    self.current_process.terminate()
+                    time.sleep(0.5)
+                    if self.current_process.poll() is None:
+                        self.current_process.kill()
+                    t_out.join(timeout=2)
+                    t_err.join(timeout=2)
+                    fake = subprocess.CompletedProcess(
+                        args=command, returncode=-2, stdout="", stderr="Stopped by user"
+                    )
+                    return fake, {"status": "error", "message": "Task stopped by user"}
+
+                if time.time() - start_time > timeout:
+                    print(f"[execute][{self.chat_id}] TIMEOUT after {timeout}s")
+                    self.current_process.terminate()
+                    time.sleep(0.5)
+                    if self.current_process.poll() is None:
+                        self.current_process.kill()
+                    t_out.join(timeout=2)
+                    t_err.join(timeout=2)
+                    fake = subprocess.CompletedProcess(
+                        args=command, returncode=-1, stdout="",
+                        stderr=f"Timeout after {timeout}s",
+                    )
+                    return fake, {"status": "error", "message": f"Timeout after {timeout}s"}
+
+                retcode = self.current_process.poll()
+                if retcode is not None:
+                    t_out.join(timeout=5)
+                    t_err.join(timeout=5)
+                    break
+
+                time.sleep(0.5)
+
+            stdout_data = "".join(stdout_chunks)
+            stderr_data = "".join(stderr_chunks)
+
+            print(f"[execute][{self.chat_id}] Exit code: {retcode}")
+            if stdout_data:
+                print(f"[execute][{self.chat_id}] stdout (last 500): {stdout_data[-500:]}")
+            if stderr_data:
+                print(f"[execute][{self.chat_id}] stderr: {stderr_data[-300:]}")
+
+            result = extract_result_from_output(stdout_data)
+            if result is None:
+                err_hint = (
+                    stderr_data.strip()[-200:]
+                    if stderr_data.strip()
+                    else "No output from subprocess"
+                )
+                result = {"status": "error", "message": f"No JSON result returned\n{err_hint}"}
+            if retcode != 0 and result.get("status") == "ok":
+                result = {"status": "error", "message": f"Process exited with code {retcode}"}
+
+            print(f"[execute][{self.chat_id}] Result: {result}")
+            completed = subprocess.CompletedProcess(
+                args=command, returncode=retcode, stdout=stdout_data, stderr=stderr_data,
+            )
+            return completed, result
+        except Exception as e:
+            print(f"[execute][{self.chat_id}] Error: {e}")
+            fake = subprocess.CompletedProcess(
+                args=command, returncode=-1, stdout="", stderr=str(e),
+            )
+            return fake, {"status": "error", "message": str(e)}
+        finally:
+            self.current_process = None
+
+    def execute_single_order(self, order_text: str) -> tuple[str, dict]:
+        order = parse_order_line(order_text)
+        command = [
+            sys.executable, str(TRADE_SCRIPT),
+            "--mode", order.mode,
+            "--currency", order.currency,
+            "--amount", order.amount,
+            "--direction", order.direction,
+            "--duration", order.duration,
+        ]
+        session = get_session(self.chat_id)
+        acc = _get_active_account(session)
+        if acc:
+            command.extend(["--account", acc["account"], "--password", acc["password"]])
+        _, result = self.run_command(command, timeout=300)
+        message = format_single_result(result, order_text)
+        return message, result
+
+    # ── Result + screenshot feedback ──
+
+    def send_result_with_screenshot(self, message: str, result: dict, start_time: float):
+        chat_id = self.chat_id
+        shot = self.latest_screenshot(after_timestamp=start_time)
+        if shot is not None:
+            print(f"[task][{chat_id}] Found screenshot: {shot}")
+            if send_photo(chat_id, shot, message):
+                try:
+                    shot.unlink()
+                except Exception:
+                    pass
+        else:
+            if result.get("status") == "ok":
+                shot = self.latest_screenshot()
+                if shot is not None:
+                    if send_photo(chat_id, shot, message):
+                        try:
+                            shot.unlink()
+                        except Exception:
+                            pass
+                else:
+                    send_message(chat_id, message + "\n(No screenshot)")
+            else:
+                send_message(chat_id, message)
+        self.cleanup_old_screenshots()
+
+    # ── Task handler ──
+
+    def handle_task(self, task: TradeTask):
+        try:
+            session = get_session(task.chat_id)
+            delay = session.get("delay", 0)
+            mode, orders = parse_message_text(task.text, task.chat_id)
+            total_orders = len(orders)
+
+            print(f"[task][{self.chat_id}] Starting: {total_orders} order(s)")
+
+            if mode == "single":
+                start_time = time.time()
+                send_message(task.chat_id, "Executing...", task.message_id)
+                message, result = self.execute_single_order(orders[0])
+                self.send_result_with_screenshot(message, result, start_time)
+            else:
+                send_message(
+                    task.chat_id, f"Batch started: {total_orders} orders", task.message_id,
+                )
+                success_count = 0
+                fail_count = 0
+                for i, order_text in enumerate(orders, 1):
+                    if self.stop_flag.is_set():
+                        send_message(task.chat_id, f"Batch stopped at {i}/{total_orders}")
+                        break
+                    start_time = time.time()
+                    send_message(task.chat_id, f"[{i}/{total_orders}] Executing: {order_text}")
+                    try:
+                        message, result = self.execute_single_order(order_text)
+                        if result.get("status") == "ok":
+                            success_count += 1
+                        else:
+                            fail_count += 1
+                        self.send_result_with_screenshot(
+                            f"[{i}/{total_orders}] {message}", result, start_time,
+                        )
+                    except Exception as e:
+                        fail_count += 1
+                        send_message(task.chat_id, f"[{i}/{total_orders}] Error: {e}")
+                    if delay > 0 and i < total_orders:
+                        time.sleep(delay)
+                send_message(
+                    task.chat_id,
+                    f"Batch completed: {success_count} OK / {fail_count} Failed",
+                )
+
+            if delay > 0 and mode == "single":
+                time.sleep(delay)
+        except Exception as exc:
+            import traceback
+            print(f"[task][{self.chat_id}] Error: {exc}")
+            traceback.print_exc()
+            send_message(task.chat_id, f"Trade failed\nError: {exc}", task.message_id)
+
+    # ── Worker loop (per-user thread) ──
+
+    def _worker_loop(self):
+        print(f"[worker][{self.chat_id}] Worker thread started")
+        while True:
+            try:
+                try:
+                    task = self.task_queue.get(timeout=300)
+                except queue.Empty:
+                    print(f"[worker][{self.chat_id}] Idle 5min, thread exiting")
+                    return
+
+                if task is None:
+                    self.task_queue.task_done()
+                    break
+
+                with self.task_list_lock:
+                    if task not in self.task_list:
+                        print(f"[worker][{self.chat_id}] Task #{task.task_id} cancelled")
+                        self.task_queue.task_done()
+                        continue
+
+                self.current_task = task
+                print(f"[worker][{self.chat_id}] Processing task #{task.task_id}")
+                try:
+                    self.handle_task(task)
+                finally:
+                    self.current_task = None
+                    self.remove_task(task)
+                self.task_queue.task_done()
+                print(
+                    f"[worker][{self.chat_id}] Task #{task.task_id} done, "
+                    f"{self.task_queue.qsize()} remaining"
+                )
+            except Exception as exc:
+                import traceback
+                print(f"[worker][{self.chat_id}] Error: {exc}")
+                traceback.print_exc()
+                self.current_task = None
+                try:
+                    self.task_queue.task_done()
+                except ValueError:
+                    pass
+                time.sleep(1)
+
+
+# ── User worker registry ──
+_USER_WORKERS: dict[str, UserWorker] = {}
+_USER_WORKERS_LOCK = threading.Lock()
+
+
+def get_worker(chat_id: str) -> UserWorker:
+    """Get or create the per-user worker (lazy init)."""
+    with _USER_WORKERS_LOCK:
+        if chat_id not in _USER_WORKERS:
+            _USER_WORKERS[chat_id] = UserWorker(chat_id)
+        worker = _USER_WORKERS[chat_id]
+    worker.ensure_worker_running()
+    return worker
 
 
 def get_health_status() -> str:
-    """Get system health status as formatted string."""
+    """Get system health status aggregated across all users."""
     lines = ["[System Health]\n"]
-    
-    # Uptime
+
     uptime_sec = int(time.time() - BOT_START_TIME)
     hours, remainder = divmod(uptime_sec, 3600)
     minutes, seconds = divmod(remainder, 60)
     lines.append(f"Uptime: {hours}h {minutes}m {seconds}s")
-    
-    # Queue status
-    queue_info = get_queue_info()
-    lines.append(f"Queue: {len(queue_info)} task(s)")
-    if CURRENT_TASK:
-        lines.append(f"Running: {CURRENT_TASK.text[:30]}...")
+
+    # Aggregate user workers
+    with _USER_WORKERS_LOCK:
+        active_workers = len(_USER_WORKERS)
+        total_pending = 0
+        running_tasks = []
+        for uid, w in _USER_WORKERS.items():
+            total_pending += len(w.task_list)
+            if w.current_task:
+                running_tasks.append(f"  {uid}: {w.current_task.text[:30]}...")
+
+    lines.append(f"Active users: {active_workers}")
+    lines.append(f"Total pending: {total_pending}")
+    if running_tasks:
+        lines.append(f"Running ({len(running_tasks)}):")
+        lines.extend(running_tasks)
     else:
         lines.append("Status: Idle")
-    
+
     if HAS_PSUTIL:
-        # Memory
         mem = psutil.virtual_memory()
-        lines.append(f"Memory: {mem.percent:.1f}% ({mem.used // 1024 // 1024}MB / {mem.total // 1024 // 1024}MB)")
-        
-        # CPU
+        lines.append(
+            f"Memory: {mem.percent:.1f}% "
+            f"({mem.used // 1024 // 1024}MB / {mem.total // 1024 // 1024}MB)"
+        )
         cpu = psutil.cpu_percent(interval=0.5)
         lines.append(f"CPU: {cpu:.1f}%")
-        
-        # Disk
         disk = psutil.disk_usage(str(ROOT_DIR))
-        lines.append(f"Disk: {disk.percent:.1f}% ({disk.free // 1024 // 1024 // 1024}GB free)")
-        
-        # Python processes
-        py_count = sum(1 for p in psutil.process_iter(['name']) 
-                      if 'python' in p.info['name'].lower())
+        lines.append(
+            f"Disk: {disk.percent:.1f}% ({disk.free // 1024 // 1024 // 1024}GB free)"
+        )
+        py_count = sum(
+            1 for p in psutil.process_iter(["name"])
+            if "python" in p.info["name"].lower()
+        )
         lines.append(f"Python processes: {py_count}")
     else:
         lines.append("(pip install psutil for detailed stats)")
-    
-    # Screenshots
+
+    # Screenshots across all user dirs
+    total_shots = 0
+    total_size = 0
     if SCREENSHOT_DIR.exists():
-        screenshots = list(SCREENSHOT_DIR.glob("*.png"))
-        total_size = sum(f.stat().st_size for f in screenshots) / 1024 / 1024
-        lines.append(f"Screenshots: {len(screenshots)} ({total_size:.1f}MB)")
-    
-    return "\n".join(lines)
+        for f in SCREENSHOT_DIR.rglob("*.png"):
+            total_shots += 1
+            total_size += f.stat().st_size
+    lines.append(f"Screenshots: {total_shots} ({total_size / 1024 / 1024:.1f}MB)")
 
-
-def format_queue_status() -> str:
-    """Format queue status as string."""
-    queue_info = get_queue_info()
-    if not queue_info:
-        if CURRENT_TASK:
-            return f"Queue: empty\nRunning: {CURRENT_TASK.text}"
-        return "Queue: empty\nStatus: Idle"
-    
-    lines = [f"Queue ({len(queue_info)} pending):"]
-    if CURRENT_TASK:
-        lines.append(f"Running: {CURRENT_TASK.text[:40]}...")
-    lines.append("")
-    
-    for info in queue_info[:10]:  # Show max 10
-        lines.append(f"{info['position']}. [#{info['task_id']}] {info['text']} ({info['age']}s ago)")
-    
-    if len(queue_info) > 10:
-        lines.append(f"... and {len(queue_info) - 10} more")
-    
     return "\n".join(lines)
 
 
@@ -596,7 +896,6 @@ def get_help_text(session: dict) -> str:
 
 def handle_management_command(chat_id: str, text: str, message_id: int) -> bool:
     """Handle management commands. Returns True if handled."""
-    # Normalize: remove leading /, lowercase, strip
     cmd = text.lower().strip()
     if cmd.startswith("/"):
         cmd = cmd[1:]
@@ -612,31 +911,35 @@ def handle_management_command(chat_id: str, text: str, message_id: int) -> bool:
         send_message(chat_id, get_health_status(), message_id)
         return True
     
-    # Queue status
+    # Queue status (per-user)
     if cmd in {"queue", "q", "list", "ls"}:
-        send_message(chat_id, format_queue_status(), message_id)
+        worker = get_worker(chat_id)
+        send_message(chat_id, worker.format_queue_status(), message_id)
         return True
     
-    # Clear queue
+    # Clear queue (per-user)
     if cmd in {"clear", "clr", "cls", "empty"}:
-        count = clear_all_queue()
+        worker = get_worker(chat_id)
+        count = worker.clear_queue()
         send_message(chat_id, f"Cleared {count} task(s) from queue", message_id)
         return True
     
-    # Cancel specific task: cancel 2, cancel2, c2, c 2
+    # Cancel specific task (per-user)
     cancel_match = re.match(r"^(?:cancel|c)\s*(\d+)$", cmd)
     if cancel_match:
         pos = int(cancel_match.group(1))
-        task = cancel_task_by_position(pos)
+        worker = get_worker(chat_id)
+        task = worker.cancel_task(pos)
         if task:
             send_message(chat_id, f"Cancelled task #{task.task_id}: {task.text[:40]}...", message_id)
         else:
             send_message(chat_id, f"No task at position {pos}", message_id)
         return True
     
-    # Stop current task
+    # Stop current task (per-user)
     if cmd in {"stop", "abort", "kill"}:
-        if stop_current_task():
+        worker = get_worker(chat_id)
+        if worker.stop_current():
             send_message(chat_id, "Stopping current task...", message_id)
         else:
             send_message(chat_id, "No task running", message_id)
@@ -645,7 +948,6 @@ def handle_management_command(chat_id: str, text: str, message_id: int) -> bool:
     # Restart bot
     if cmd in {"restart", "reboot", "reload"}:
         send_message(chat_id, "Restarting bot in 2 seconds...", message_id)
-        # Schedule restart in background thread
         def do_restart():
             time.sleep(2)
             print("[bot] Restarting via os.execv...")
@@ -796,310 +1098,6 @@ def format_batch_result(result: dict) -> str:
     return "\n".join(lines)
 
 
-def latest_screenshot(after_timestamp: Optional[float] = None) -> Optional[Path]:
-    """Get the latest screenshot, optionally only those created after a given timestamp."""
-    if not SCREENSHOT_DIR.exists():
-        return None
-    candidates = [path for path in SCREENSHOT_DIR.glob("*.png") if path.is_file()]
-    if not candidates:
-        return None
-    
-    if after_timestamp is not None:
-        # Only consider screenshots created after the given timestamp
-        candidates = [p for p in candidates if p.stat().st_mtime > after_timestamp]
-        if not candidates:
-            return None
-    
-    return max(candidates, key=lambda item: item.stat().st_mtime)
-
-
-def run_command(command: list[str], timeout: int = 600) -> tuple[subprocess.CompletedProcess, dict]:
-    """Run a command with timeout protection and support for interruption."""
-    global CURRENT_PROCESS
-    
-    print(f"[execute] Running: {' '.join(command)}")
-    env = dict(os.environ, PYTHONIOENCODING="utf-8")
-    STOP_CURRENT_FLAG.clear()
-    
-    try:
-        CURRENT_PROCESS = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            cwd=str(ROOT_DIR),
-        )
-        
-        start_time = time.time()
-        
-        # Use a thread to read stdout/stderr to avoid pipe deadlock on Mac/Linux
-        import threading
-        stdout_chunks = []
-        stderr_chunks = []
-        
-        def _read_stdout():
-            for line in CURRENT_PROCESS.stdout:
-                stdout_chunks.append(line)
-        
-        def _read_stderr():
-            for line in CURRENT_PROCESS.stderr:
-                stderr_chunks.append(line)
-        
-        t_out = threading.Thread(target=_read_stdout, daemon=True)
-        t_err = threading.Thread(target=_read_stderr, daemon=True)
-        t_out.start()
-        t_err.start()
-        
-        while True:
-            if STOP_CURRENT_FLAG.is_set():
-                print("[execute] Stop signal received, terminating process")
-                CURRENT_PROCESS.terminate()
-                time.sleep(0.5)
-                if CURRENT_PROCESS.poll() is None:
-                    CURRENT_PROCESS.kill()
-                t_out.join(timeout=2)
-                t_err.join(timeout=2)
-                fake_completed = subprocess.CompletedProcess(
-                    args=command, returncode=-2, stdout="", stderr="Stopped by user"
-                )
-                return fake_completed, {"status": "error", "message": "Task stopped by user"}
-            
-            if time.time() - start_time > timeout:
-                print(f"[execute] TIMEOUT: Command exceeded {timeout}s limit")
-                CURRENT_PROCESS.terminate()
-                time.sleep(0.5)
-                if CURRENT_PROCESS.poll() is None:
-                    CURRENT_PROCESS.kill()
-                t_out.join(timeout=2)
-                t_err.join(timeout=2)
-                fake_completed = subprocess.CompletedProcess(
-                    args=command, returncode=-1, stdout="", stderr=f"Timeout after {timeout}s"
-                )
-                return fake_completed, {"status": "error", "message": f"Timeout after {timeout}s"}
-            
-            retcode = CURRENT_PROCESS.poll()
-            if retcode is not None:
-                t_out.join(timeout=5)
-                t_err.join(timeout=5)
-                break
-            
-            time.sleep(0.5)
-        
-        stdout_data = "".join(stdout_chunks)
-        stderr_data = "".join(stderr_chunks)
-        
-        print(f"[execute] Exit code: {retcode}")
-        if stdout_data:
-            print(f"[execute] stdout (last 500 chars): {stdout_data[-500:]}")
-        if stderr_data:
-            print(f"[execute] stderr: {stderr_data[-300:]}")
-        
-        result = extract_result_from_output(stdout_data)
-        if result is None:
-            err_hint = stderr_data.strip()[-200:] if stderr_data.strip() else "No output from subprocess"
-            result = {"status": "error", "message": f"No JSON result returned\n{err_hint}"}
-        if retcode != 0 and result.get("status") == "ok":
-            result = {"status": "error", "message": f"Process exited with code {retcode}"}
-        
-        print(f"[execute] Result: {result}")
-        completed = subprocess.CompletedProcess(
-            args=command, returncode=retcode, stdout=stdout_data, stderr=stderr_data
-        )
-        return completed, result
-        
-    except Exception as e:
-        print(f"[execute] Error: {e}")
-        fake_completed = subprocess.CompletedProcess(
-            args=command, returncode=-1, stdout="", stderr=str(e)
-        )
-        return fake_completed, {"status": "error", "message": str(e)}
-    finally:
-        CURRENT_PROCESS = None
-
-
-def execute_single_order(order_text: str, chat_id: str) -> tuple[str, dict]:
-    """Execute a single order and return (message, result)."""
-    order = parse_order_line(order_text)
-    command = [
-        sys.executable,
-        str(TRADE_SCRIPT),
-        "--mode",
-        order.mode,
-        "--currency",
-        order.currency,
-        "--amount",
-        order.amount,
-        "--direction",
-        order.direction,
-        "--duration",
-        order.duration,
-    ]
-    # Use active account if set
-    session = get_session(chat_id)
-    acc = _get_active_account(session)
-    if acc:
-        command.extend(["--account", acc["account"], "--password", acc["password"]])
-    # 单笔交易最多 5 分钟
-    _, result = run_command(command, timeout=300)
-    message = format_single_result(result, order_text)
-    return message, result
-
-
-def handle_task(task: TradeTask):
-    try:
-        session = get_session(task.chat_id)
-        delay = session.get("delay", 0)
-        
-        mode, orders = parse_message_text(task.text, task.chat_id)
-        total_orders = len(orders)
-        
-        print(f"[task] Starting task: {total_orders} order(s)")
-        
-        if mode == "single":
-            # Single order - same as before
-            start_time = time.time()
-            send_message(task.chat_id, "Executing...", task.message_id)
-            message, result = execute_single_order(orders[0], task.chat_id)
-            _send_result_with_screenshot(task.chat_id, message, result, start_time)
-        else:
-            # Batch orders - execute one by one with immediate feedback
-            send_message(task.chat_id, f"Batch started: {total_orders} orders", task.message_id)
-            
-            success_count = 0
-            fail_count = 0
-            
-            for i, order_text in enumerate(orders, 1):
-                # Check if stop was requested
-                if STOP_CURRENT_FLAG.is_set():
-                    send_message(task.chat_id, f"Batch stopped at {i}/{total_orders}")
-                    break
-                
-                start_time = time.time()
-                send_message(task.chat_id, f"[{i}/{total_orders}] Executing: {order_text}")
-                
-                try:
-                    message, result = execute_single_order(order_text, task.chat_id)
-                    
-                    if result.get("status") == "ok":
-                        success_count += 1
-                    else:
-                        fail_count += 1
-                    
-                    # Immediate feedback with screenshot
-                    _send_result_with_screenshot(task.chat_id, f"[{i}/{total_orders}] {message}", result, start_time)
-                    
-                except Exception as e:
-                    fail_count += 1
-                    send_message(task.chat_id, f"[{i}/{total_orders}] Error: {e}")
-                
-                # Apply delay between orders (except after last)
-                if delay > 0 and i < total_orders:
-                    time.sleep(delay)
-            
-            # Final summary
-            send_message(task.chat_id, f"Batch completed: {success_count} OK / {fail_count} Failed")
-        
-        # Apply delay after task completion
-        if delay > 0 and mode == "single":
-            print(f"[telegram] Waiting {delay}s before next task...")
-            time.sleep(delay)
-            
-    except Exception as exc:
-        import traceback
-        print(f"[task] Error: {exc}")
-        traceback.print_exc()
-        send_message(task.chat_id, f"Trade failed\nError: {exc}", task.message_id)
-
-
-def _cleanup_old_screenshots():
-    """Delete all screenshots older than 1 hour to prevent accumulation."""
-    if not SCREENSHOT_DIR.exists():
-        return
-    cutoff = time.time() - 3600
-    for f in SCREENSHOT_DIR.glob("*.png"):
-        try:
-            if f.stat().st_mtime < cutoff:
-                f.unlink()
-        except Exception:
-            pass
-
-
-def _send_result_with_screenshot(chat_id: str, message: str, result: dict, start_time: float):
-    """Helper to send result message with screenshot."""
-    shot = latest_screenshot(after_timestamp=start_time)
-    if shot is not None:
-        print(f"[task] Found new screenshot: {shot}")
-        if send_photo(chat_id, shot, message):
-            try:
-                shot.unlink()
-                print(f"[task] Deleted screenshot: {shot}")
-            except Exception as e:
-                print(f"[task] Failed to delete screenshot: {e}")
-    else:
-        if result.get("status") == "ok":
-            shot = latest_screenshot()
-            if shot is not None:
-                if send_photo(chat_id, shot, message):
-                    try:
-                        shot.unlink()
-                    except Exception:
-                        pass
-            else:
-                send_message(chat_id, message + "\n(No screenshot)")
-        else:
-            send_message(chat_id, message)
-    # Clean up old screenshots after each trade
-    _cleanup_old_screenshots()
-
-
-def worker_loop():
-    """Worker loop using global TASK_QUEUE."""
-    global CURRENT_TASK
-    print("[worker] Worker thread started")
-    while True:
-        try:
-            pending = TASK_QUEUE.qsize()
-            if pending > 0:
-                print(f"[worker] {pending} task(s) waiting in queue")
-            
-            task = TASK_QUEUE.get()
-            if task is None:
-                TASK_QUEUE.task_done()
-                break
-            
-            # Check if task was cancelled (not in TASK_LIST anymore)
-            with TASK_LIST_LOCK:
-                if task not in TASK_LIST:
-                    print(f"[worker] Task #{task.task_id} was cancelled, skipping")
-                    TASK_QUEUE.task_done()
-                    continue
-            
-            CURRENT_TASK = task
-            print(f"[worker] Processing task #{task.task_id} from chat {task.chat_id}")
-            
-            try:
-                handle_task(task)
-            finally:
-                CURRENT_TASK = None
-                remove_task_from_list(task)
-            
-            TASK_QUEUE.task_done()
-            print(f"[worker] Task #{task.task_id} completed, {TASK_QUEUE.qsize()} remaining")
-        except Exception as exc:
-            import traceback
-            print(f"[worker] Unhandled error in worker loop: {exc}")
-            traceback.print_exc()
-            CURRENT_TASK = None
-            try:
-                TASK_QUEUE.task_done()
-            except ValueError:
-                pass
-            time.sleep(1)  # Brief pause before continuing
-
-
 def extract_text_from_update(update: dict) -> Optional[TradeTask]:
     message = update.get("message") or update.get("edited_message")
     if not message:
@@ -1151,7 +1149,7 @@ def extract_text_from_update(update: dict) -> Optional[TradeTask]:
 
 
 def poll_updates():
-    """Poll for updates using global TASK_QUEUE."""
+    """Poll for updates, route tasks to per-user workers."""
     offset = 0
     while True:
         try:
@@ -1171,15 +1169,16 @@ def poll_updates():
                 try:
                     mode, orders = parse_message_text(task.text, task.chat_id)
                 except Exception:
-                    session = get_session(task.chat_id)
                     send_message(
                         task.chat_id,
-                        f"Invalid order format\n\nExample: BTC 60 down 60s\nValid durations: 60s, 90s, 120s, 180s, 300s\n\nType /help for commands",
+                        "Invalid order format\n\nExample: BTC 60 down 60s\n"
+                        "Valid durations: 60s, 90s, 120s, 180s, 300s\n\nType /help for commands",
                         task.message_id,
                     )
                     continue
 
-                position = add_task_to_queue(task)
+                worker = get_worker(task.chat_id)
+                position = worker.add_task(task)
                 label = "batch" if mode == "batch" else "single"
                 send_message(
                     task.chat_id,
@@ -1196,32 +1195,29 @@ def poll_updates():
 
 def main():
     global BOT_START_TIME
-    
+
     if not BOT_TOKEN:
         raise SystemExit("TELEGRAM_BOT_TOKEN is required")
 
-    # Load saved sessions
     load_sessions()
-    
     SCREENSHOT_DIR.mkdir(exist_ok=True)
     BOT_START_TIME = time.time()
-    
-    # Auto-restart loop
+
     restart_count = 0
     max_restart_delay = 60
-    
+
     while True:
         try:
-            worker = threading.Thread(target=worker_loop, daemon=True)
-            worker.start()
-
-            print("[telegram] Bot listener started")
-            print(f"[telegram] Queue worker ready. Allowed chats: {sorted(ALLOWED_CHAT_IDS) if ALLOWED_CHAT_IDS else 'ALL'}")
+            print("[telegram] Bot listener started (per-user concurrent mode)")
+            print(
+                f"[telegram] Allowed chats: "
+                f"{sorted(ALLOWED_CHAT_IDS) if ALLOWED_CHAT_IDS else 'ALL'}"
+            )
             if restart_count > 0:
                 print(f"[telegram] Auto-restarted (attempt #{restart_count})")
-            
+
             poll_updates()
-            
+
         except KeyboardInterrupt:
             print("\n[telegram] Shutting down...")
             break

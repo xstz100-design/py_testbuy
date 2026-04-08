@@ -2,6 +2,14 @@
 
 Python + Playwright automated trading system for [bptradinguk.com](https://bptradinguk.com/) with Telegram bot integration.
 
+## Architecture
+
+**Multi-user concurrent mode**: One bot serves multiple users simultaneously.
+- Each user (chat_id) gets an independent task queue and worker thread
+- User A's trade executes in parallel with User B's — no blocking
+- Screenshots are isolated per user (`screenshots/{chat_id}/`) to prevent cross-talk
+- Settings, accounts, and withdrawal configs are stored per-user
+
 ## Project Structure
 
 ```
