@@ -6,7 +6,10 @@ Designed to run at Windows startup.
 
 Usage:
     python bot_watchdog.py
+    python bot_watchdog.py --instance /path/to/instance/dir
 """
+import argparse
+import os
 import subprocess
 import sys
 import time
@@ -17,7 +20,20 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent
 BOT_SCRIPT = ROOT_DIR / "telegram_bot.py"
 MAINTENANCE_SCRIPT = ROOT_DIR / "maintenance.py"
-LOG_FILE = ROOT_DIR / "watchdog.log"
+
+# Parse --instance argument early
+_parser = argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--instance", default=None)
+_args, _ = _parser.parse_known_args()
+INSTANCE_DIR = Path(_args.instance).resolve() if _args.instance else None
+
+# Set log file location based on instance
+LOG_FILE = (INSTANCE_DIR / "watchdog.log") if INSTANCE_DIR else (ROOT_DIR / "watchdog.log")
+
+# Set environment for child processes
+_CHILD_ENV = dict(os.environ)
+if INSTANCE_DIR:
+    _CHILD_ENV["BP_INSTANCE_DIR"] = str(INSTANCE_DIR)
 
 # Prefer .venv Python over system/anaconda Python
 _VENV_PYTHON_WIN = ROOT_DIR.parent / ".venv" / "Scripts" / "python.exe"
@@ -123,6 +139,8 @@ def periodic_tasks():
 def run_bot():
     """Run the bot and return exit code."""
     log(f"Starting bot: {BOT_SCRIPT}")
+    if INSTANCE_DIR:
+        log(f"Instance dir: {INSTANCE_DIR}")
     try:
         process = subprocess.Popen(
             [PYTHON_EXE, str(BOT_SCRIPT)],
@@ -132,6 +150,7 @@ def run_bot():
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=_CHILD_ENV,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         

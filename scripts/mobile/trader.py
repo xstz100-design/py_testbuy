@@ -20,6 +20,10 @@ import argparse
 import json
 from pathlib import Path
 
+# Multi-instance support
+_INSTANCE_DIR = os.environ.get("BP_INSTANCE_DIR")
+if _INSTANCE_DIR:
+    sys.path.insert(0, str(Path(_INSTANCE_DIR).resolve()))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import (
     TRADE_URL, ACCOUNT, PASSWORD, BROWSER, TIMEOUT, DELAYS,
@@ -28,8 +32,9 @@ from config import (
 from playwright.sync_api import sync_playwright
 
 ROOT_DIR       = Path(__file__).resolve().parent.parent
-SCREENSHOT_DIR = ROOT_DIR / "screenshots"
-AUTH_FILE       = ROOT_DIR / "auth.json"
+DATA_DIR       = Path(_INSTANCE_DIR).resolve() if _INSTANCE_DIR else ROOT_DIR
+SCREENSHOT_DIR = DATA_DIR / "screenshots"
+AUTH_FILE       = DATA_DIR / "auth.json"
 SCREENSHOT_DIR.mkdir(exist_ok=True)
 
 IPHONE = {

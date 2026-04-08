@@ -8,9 +8,14 @@ Usage:
     python trade.py --currency LTC --amount 30 --direction down
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
+# Multi-instance support
+_INSTANCE_DIR = os.environ.get("BP_INSTANCE_DIR")
+if _INSTANCE_DIR:
+    sys.path.insert(0, str(Path(_INSTANCE_DIR).resolve()))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import TRADE_DEFAULTS
 

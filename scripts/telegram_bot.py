@@ -29,6 +29,11 @@ from pathlib import Path
 from typing import Optional, List
 from urllib import error, parse, request
 
+# Multi-instance support: BP_INSTANCE_DIR overrides config/data paths
+_INSTANCE_DIR = Path(os.environ.get("BP_INSTANCE_DIR", "")).resolve() if os.environ.get("BP_INSTANCE_DIR") else None
+if _INSTANCE_DIR:
+    sys.path.insert(0, str(_INSTANCE_DIR))
+
 from batch_trade import extract_result_from_output, parse_order_line
 import config
 
@@ -41,9 +46,10 @@ except ImportError:
 
 
 ROOT_DIR = Path(__file__).resolve().parent
+DATA_DIR = _INSTANCE_DIR if _INSTANCE_DIR else ROOT_DIR
 TRADE_SCRIPT = ROOT_DIR / "trade.py"
 BATCH_SCRIPT = ROOT_DIR / "batch_trade.py"
-SCREENSHOT_DIR = ROOT_DIR / "screenshots"
+SCREENSHOT_DIR = DATA_DIR / "screenshots"
 
 # Load bot token from env or config
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() or getattr(config, "TELEGRAM_BOT_TOKEN", "")
@@ -64,7 +70,7 @@ ORDER_PATTERN = re.compile(
 )
 
 # Session state per chat: {chat_id: {"mode": "desktop", "delay": 0}}
-SESSION_FILE = ROOT_DIR / "telegram_session.json"
+SESSION_FILE = DATA_DIR / "telegram_session.json"
 CHAT_SESSION: dict[str, dict] = {}
 
 
