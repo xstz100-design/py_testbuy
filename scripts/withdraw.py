@@ -32,9 +32,13 @@ from playwright.sync_api import sync_playwright
 
 ROOT_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(_INSTANCE_DIR).resolve() if _INSTANCE_DIR else ROOT_DIR
-AUTH_FILE = DATA_DIR / "auth.json"
 _SCREENSHOT_DIR_ENV = os.environ.get("BP_SCREENSHOT_DIR")
-SCREENSHOT_DIR = Path(_SCREENSHOT_DIR_ENV) if _SCREENSHOT_DIR_ENV else DATA_DIR / "screenshots"
+if _SCREENSHOT_DIR_ENV:
+    SCREENSHOT_DIR = Path(_SCREENSHOT_DIR_ENV)
+    AUTH_FILE = SCREENSHOT_DIR / "auth.json"
+else:
+    SCREENSHOT_DIR = DATA_DIR / "screenshots"
+    AUTH_FILE = DATA_DIR / "auth.json"
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 

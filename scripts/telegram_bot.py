@@ -286,15 +286,18 @@ def _execute_withdraw(chat_id: str, amount: str, account: str, password: str,
     ]
 
     worker = get_worker(chat_id)
+    # Serialize withdrawals on the same website account
+    lock = _get_account_lock(account)
     start_time = time.time()
     try:
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
                    BP_SCREENSHOT_DIR=str(worker.screenshot_dir))
-        proc = subprocess.run(
-            command,
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            env=env, cwd=str(ROOT_DIR), timeout=120,
-        )
+        with lock:
+            proc = subprocess.run(
+                command,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                env=env, cwd=str(ROOT_DIR), timeout=120,
+            )
         result = extract_result_from_output(proc.stdout)
         shot = worker.latest_withdraw_screenshot(start_time)
         if result and result.get("status") == "ok":
@@ -393,6 +396,20 @@ def _next_task_id() -> int:
     with _TASK_COUNTER_LOCK:
         _TASK_COUNTER += 1
         return _TASK_COUNTER
+
+
+# ── Account-level locks: same website account must be serialized ──
+_ACCOUNT_LOCKS: dict[str, threading.Lock] = {}
+_ACCOUNT_LOCKS_GUARD = threading.Lock()
+
+
+def _get_account_lock(account: str) -> threading.Lock:
+    """Get or create a lock for a specific website account.
+    Trades on the same account are serialized; different accounts run in parallel."""
+    with _ACCOUNT_LOCKS_GUARD:
+        if account not in _ACCOUNT_LOCKS:
+            _ACCOUNT_LOCKS[account] = threading.Lock()
+        return _ACCOUNT_LOCKS[account]
 
 
 class UserWorker:
@@ -642,9 +659,17 @@ class UserWorker:
         ]
         session = get_session(self.chat_id)
         acc = _get_active_account(session)
+        account = acc["account"] if acc else config.ACCOUNT
         if acc:
             command.extend(["--account", acc["account"], "--password", acc["password"]])
-        _, result = self.run_command(command, timeout=300)
+
+        # Serialize trades on the same website account
+        lock = _get_account_lock(account)
+        print(f"[lock][{self.chat_id}] Waiting for account lock: {account}")
+        with lock:
+            print(f"[lock][{self.chat_id}] Acquired account lock: {account}")
+            _, result = self.run_command(command, timeout=300)
+        print(f"[lock][{self.chat_id}] Released account lock: {account}")
         message = format_single_result(result, order_text)
         return message, result
 
@@ -945,14 +970,23 @@ def handle_management_command(chat_id: str, text: str, message_id: int) -> bool:
             send_message(chat_id, "No task running", message_id)
         return True
     
-    # Restart bot
+    # Restart (per-user: reset user's worker only, not the whole bot)
     if cmd in {"restart", "reboot", "reload"}:
-        send_message(chat_id, "Restarting bot in 2 seconds...", message_id)
-        def do_restart():
-            time.sleep(2)
-            print("[bot] Restarting via os.execv...")
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-        threading.Thread(target=do_restart, daemon=True).start()
+        worker = get_worker(chat_id)
+        worker.stop_current()
+        count = worker.clear_queue()
+        # Kill worker thread so it restarts fresh on next task
+        worker.task_queue.put(None)
+        # Clear user screenshot cache
+        worker.cleanup_old_screenshots()
+        send_message(
+            chat_id,
+            f"Your environment has been reset\n"
+            f"- Cleared {count} pending task(s)\n"
+            f"- Stopped current task\n"
+            f"- Worker thread will restart on next order",
+            message_id,
+        )
         return True
     
     return False
