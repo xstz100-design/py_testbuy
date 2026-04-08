@@ -288,7 +288,7 @@ def _execute_withdraw(chat_id: str, amount: str, account: str, password: str,
     worker = get_worker(chat_id)
     start_time = time.time()
     try:
-        env = dict(os.environ, PYTHONIOENCODING="utf-8",
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
                    BP_SCREENSHOT_DIR=str(worker.screenshot_dir))
         proc = subprocess.run(
             command,
@@ -529,7 +529,7 @@ class UserWorker:
 
     def run_command(self, command: list[str], timeout: int = 600) -> tuple:
         print(f"[execute][{self.chat_id}] Running: {' '.join(command)}")
-        env = dict(os.environ, PYTHONIOENCODING="utf-8",
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
                    BP_SCREENSHOT_DIR=str(self.screenshot_dir))
         self.stop_flag.clear()
         try:
