@@ -16,7 +16,10 @@ import gc
 import asyncio
 import argparse
 import json
+import platform
 from pathlib import Path
+
+_SELECT_ALL = "Meta+A" if platform.system() == "Darwin" else "Control+A"
 
 # Multi-instance support
 _INSTANCE_DIR = os.environ.get("BP_INSTANCE_DIR")
@@ -333,7 +336,7 @@ def enter_amount(page, amount: str) -> bool:
 
         target.click(click_count=3)
         page.wait_for_timeout(100)
-        page.keyboard.press("Control+A")
+        page.keyboard.press(_SELECT_ALL)
         page.keyboard.press("Delete")
         page.wait_for_timeout(80)
         page.keyboard.type(amount, delay=30)
