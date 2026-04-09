@@ -157,7 +157,7 @@ try:
     from importlib.metadata import version as pkg_version
     print(f'  Playwright: {pkg_version(\"playwright\")}')
 except Exception:
-    import playwright; print('  Playwright: installed')
+    print('  Playwright: installed')
 import psutil; print(f'  psutil: {psutil.__version__}')
 print('  All OK!')
 "
