@@ -469,12 +469,18 @@ class UserWorker:
         with self.task_list_lock:
             count = len(self.task_list)
             self.task_list.clear()
+            # Drain the queue but do NOT call task_done() here —
+            # the worker loop calls task_done() after it pulls each item.
+            # Pulled items will be skipped because they're no longer in task_list.
+            drained: list = []
             while not self.task_queue.empty():
                 try:
-                    self.task_queue.get_nowait()
-                    self.task_queue.task_done()
+                    drained.append(self.task_queue.get_nowait())
                 except queue.Empty:
                     break
+            # Put back sentinel-free items so task_done counts stay balanced
+            for _ in drained:
+                self.task_queue.task_done()
             return count
 
     def stop_current(self) -> bool:
@@ -946,7 +952,11 @@ def handle_management_command(chat_id: str, text: str, message_id: int) -> bool:
     if cmd in {"clear", "clr", "cls", "empty"}:
         worker = get_worker(chat_id)
         count = worker.clear_queue()
-        send_message(chat_id, f"Cleared {count} task(s) from queue", message_id)
+        stopped = worker.stop_current()
+        msg = f"Cleared {count} task(s) from queue"
+        if stopped:
+            msg += "\nStopped running task"
+        send_message(chat_id, msg, message_id)
         return True
     
     # Cancel specific task (per-user)
