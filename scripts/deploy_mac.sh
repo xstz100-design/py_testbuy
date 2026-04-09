@@ -1,6 +1,7 @@
 #!/bin/bash
 # ============================================================
 #  BPTrading Mac One-Click Deploy
+#  Supports: fresh install & upgrade (preserves user data)
 #  Usage: bash deploy_mac.sh
 # ============================================================
 set -e
@@ -23,6 +24,41 @@ echo "============================================"
 echo "  BPTrading - Mac One-Click Deploy"
 echo "============================================"
 echo ""
+
+# ── 0. Stop running bot if upgrading ──
+if [ -f "$SCRIPT_DIR/.bot.pid" ]; then
+    OLD_PID=$(cat "$SCRIPT_DIR/.bot.pid")
+    if kill -0 "$OLD_PID" 2>/dev/null; then
+        info "Stopping running bot (PID: $OLD_PID)..."
+        kill "$OLD_PID" 2>/dev/null || true
+        sleep 2
+        kill -9 "$OLD_PID" 2>/dev/null || true
+    fi
+    rm -f "$SCRIPT_DIR/.bot.pid"
+fi
+
+# ── 0.1 Pull latest code (preserve user data) ──
+if [ -d "$PROJECT_DIR/.git" ]; then
+    info "Existing installation detected, pulling latest code..."
+    cd "$PROJECT_DIR"
+    # Stash any local changes to tracked files
+    git stash -q 2>/dev/null || true
+    git pull --ff-only origin main 2>/dev/null || {
+        warn "Fast-forward pull failed, trying reset..."
+        git fetch origin main
+        git reset --hard origin/main
+    }
+    info "Code updated to latest version"
+    
+    # Count preserved user files
+    PRESERVED=0
+    [ -f "$SCRIPT_DIR/config.py" ]               && PRESERVED=$((PRESERVED+1))
+    [ -f "$SCRIPT_DIR/telegram_session.json" ]    && PRESERVED=$((PRESERVED+1))
+    [ -d "$SCRIPT_DIR/screenshots" ]              && PRESERVED=$((PRESERVED+1))
+    if [ $PRESERVED -gt 0 ]; then
+        info "Preserved $PRESERVED user data item(s) (config, sessions, screenshots)"
+    fi
+fi
 
 # ── 1. Check Python 3.10+ ──
 info "Checking Python..."
@@ -135,7 +171,20 @@ echo "  Start bot:  bash $SCRIPT_DIR/start_bot_mac.sh"
 echo "  Stop bot:   bash $SCRIPT_DIR/stop_bot_mac.sh"
 echo "  Config:     $SCRIPT_DIR/config.py"
 echo ""
-echo "  IMPORTANT: Edit config.py with your:"
-echo "    - ACCOUNT / PASSWORD"
-echo "    - TELEGRAM_BOT_TOKEN"
+
+# Show preserved data summary
+if [ -f "$SCRIPT_DIR/telegram_session.json" ] && [ "$(cat "$SCRIPT_DIR/telegram_session.json")" != "{}" ]; then
+    SESSIONS=$($VENV_PY -c "import json; d=json.load(open('$SCRIPT_DIR/telegram_session.json')); print(len(d))" 2>/dev/null || echo "?")
+    info "Preserved: $SESSIONS user session(s) in telegram_session.json"
+fi
+if [ -d "$SCRIPT_DIR/screenshots" ]; then
+    USER_DIRS=$(find "$SCRIPT_DIR/screenshots" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$USER_DIRS" -gt 0 ]; then
+        info "Preserved: $USER_DIRS user data dir(s) in screenshots/"
+    fi
+fi
+
+echo ""
+echo "  To upgrade later:  bash $SCRIPT_DIR/deploy_mac.sh"
+echo "    (user data is preserved automatically)"
 echo ""
