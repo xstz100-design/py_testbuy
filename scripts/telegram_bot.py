@@ -1250,6 +1250,86 @@ def main():
     if not BOT_TOKEN:
         raise SystemExit("TELEGRAM_BOT_TOKEN is required")
 
+    # ── Single-instance lock ──
+    import fcntl  # noqa: F401 — Unix only; falls back on Windows
+    _PID_FILE = DATA_DIR / ".bot.pid"
+    _lock_fh = None
+
+    def _kill_old_instance(old_pid: int) -> None:
+        """Gracefully stop an old bot instance, force-kill if needed."""
+        import signal as _signal
+        try:
+            os.kill(old_pid, _signal.SIGTERM)
+            print(f"[bot] Sent SIGTERM to old instance (PID {old_pid}), waiting...")
+        except OSError:
+            return
+        for _ in range(30):  # wait up to 3 s
+            time.sleep(0.1)
+            try:
+                os.kill(old_pid, 0)
+            except OSError:
+                return  # process gone
+        # Still alive — force kill
+        try:
+            os.kill(old_pid, _signal.SIGKILL)
+            print(f"[bot] Force-killed old instance (PID {old_pid})")
+        except OSError:
+            pass
+
+    def _acquire_lock() -> None:
+        nonlocal _lock_fh
+        import platform
+        if platform.system() == "Windows":
+            # Windows: use a simple PID file (no fcntl)
+            if _PID_FILE.exists():
+                try:
+                    old_pid = int(_PID_FILE.read_text().strip())
+                    try:
+                        import psutil
+                        if psutil.pid_exists(old_pid):
+                            print(f"[bot] Stopping previous instance (PID {old_pid})...")
+                            import ctypes, subprocess as _sp
+                            _sp.run(["taskkill", "/PID", str(old_pid), "/F"], capture_output=True)
+                            time.sleep(1)
+                    except ImportError:
+                        pass
+                except ValueError:
+                    pass
+            _PID_FILE.write_text(str(os.getpid()))
+        else:
+            # Unix: check PID file, kill old instance, then take the lock
+            if _PID_FILE.exists():
+                try:
+                    old_pid = int(_PID_FILE.read_text().strip())
+                    try:
+                        os.kill(old_pid, 0)  # check if alive
+                        print(f"[bot] Stopping previous instance (PID {old_pid})...")
+                        _kill_old_instance(old_pid)
+                    except OSError:
+                        pass  # already gone
+                except ValueError:
+                    pass
+                _PID_FILE.unlink(missing_ok=True)
+
+            import fcntl as _fcntl
+            _lock_fh = open(_PID_FILE, "w")
+            _fcntl.flock(_lock_fh, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            _lock_fh.write(str(os.getpid()))
+            _lock_fh.flush()
+
+    def _release_lock() -> None:
+        try:
+            _PID_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        if _lock_fh:
+            try:
+                _lock_fh.close()
+            except Exception:
+                pass
+
+    _acquire_lock()
+
     load_sessions()
     SCREENSHOT_DIR.mkdir(exist_ok=True)
     BOT_START_TIME = time.time()
@@ -1271,6 +1351,7 @@ def main():
 
         except KeyboardInterrupt:
             print("\n[telegram] Shutting down...")
+            _release_lock()
             break
         except Exception as exc:
             import traceback
@@ -1280,6 +1361,8 @@ def main():
             traceback.print_exc()
             print(f"[telegram] Restarting in {delay}s (attempt #{restart_count})...")
             time.sleep(delay)
+
+    _release_lock()
 
 
 if __name__ == "__main__":

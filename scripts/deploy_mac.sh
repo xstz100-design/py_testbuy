@@ -36,12 +36,37 @@ if [ -f "$SCRIPT_DIR/.bot.pid" ]; then
     fi
     rm -f "$SCRIPT_DIR/.bot.pid"
 fi
+# Also kill any stray telegram_bot.py processes to avoid 409 Conflict
+pkill -f "telegram_bot.py" 2>/dev/null || true
+sleep 1
 
 # ── 0.1 Pull latest code (preserve user data) ──
 if [ -d "$PROJECT_DIR/.git" ]; then
     info "Existing installation detected, pulling latest code..."
     cd "$PROJECT_DIR"
-    # Stash any local changes to tracked files
+
+    # ── Backup all user data before git operations ──
+    BACKUP_DIR="$(mktemp -d)"
+    PRESERVED=0
+
+    # Files/dirs that must survive a git reset
+    for item in \
+        "$SCRIPT_DIR/config.py" \
+        "$SCRIPT_DIR/telegram_session.json" \
+        "$SCRIPT_DIR/auth.json" \
+        "$SCRIPT_DIR/.bot.pid"
+    do
+        if [ -f "$item" ]; then
+            cp "$item" "$BACKUP_DIR/" 2>/dev/null && PRESERVED=$((PRESERVED+1))
+        fi
+    done
+
+    # screenshots/ directory (contains per-user auth.json + trade images)
+    if [ -d "$SCRIPT_DIR/screenshots" ]; then
+        cp -r "$SCRIPT_DIR/screenshots" "$BACKUP_DIR/screenshots" 2>/dev/null && PRESERVED=$((PRESERVED+1))
+    fi
+
+    # git pull / reset
     git stash -q 2>/dev/null || true
     git pull --ff-only origin main 2>/dev/null || {
         warn "Fast-forward pull failed, trying reset..."
@@ -49,14 +74,22 @@ if [ -d "$PROJECT_DIR/.git" ]; then
         git reset --hard origin/main
     }
     info "Code updated to latest version"
-    
-    # Count preserved user files
-    PRESERVED=0
-    [ -f "$SCRIPT_DIR/config.py" ]               && PRESERVED=$((PRESERVED+1))
-    [ -f "$SCRIPT_DIR/telegram_session.json" ]    && PRESERVED=$((PRESERVED+1))
-    [ -d "$SCRIPT_DIR/screenshots" ]              && PRESERVED=$((PRESERVED+1))
+
+    # ── Restore user data ──
+    for item in config.py telegram_session.json auth.json; do
+        if [ -f "$BACKUP_DIR/$item" ]; then
+            cp "$BACKUP_DIR/$item" "$SCRIPT_DIR/$item"
+        fi
+    done
+    if [ -d "$BACKUP_DIR/screenshots" ]; then
+        # Merge: keep new files added by git, restore user subdirs on top
+        cp -rn "$BACKUP_DIR/screenshots/." "$SCRIPT_DIR/screenshots/" 2>/dev/null || \
+        cp -r  "$BACKUP_DIR/screenshots"   "$SCRIPT_DIR/screenshots"  2>/dev/null || true
+    fi
+    rm -rf "$BACKUP_DIR"
+
     if [ $PRESERVED -gt 0 ]; then
-        info "Preserved $PRESERVED user data item(s) (config, sessions, screenshots)"
+        info "Preserved & restored $PRESERVED user data item(s) (config, sessions, auth, screenshots)"
     fi
 fi
 
