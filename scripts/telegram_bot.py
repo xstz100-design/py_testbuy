@@ -1204,12 +1204,19 @@ def poll_updates():
     """Poll for updates, route tasks to per-user workers.
 
     Telegram only allows ONE active getUpdates connection per token.
-    If another instance starts (on any device), this instance will receive
-    consecutive HTTP 409 Conflict errors.  After _MAX_CONSECUTIVE_409 such
-    errors we exit gracefully so the new instance takes over automatically.
+    Preemption policy:
+    - Newly started instance should win.
+    - Long-running instance should yield quickly after receiving 409.
     """
-    _MAX_CONSECUTIVE_409 = 4   # ~20 s of 409s → yield to the new instance
+    _NEW_INSTANCE_GRAB_SECONDS = 20
+    _OLD_INSTANCE_YIELD_AFTER_409 = 2
     _consecutive_409 = 0
+    _boot_ts = time.time()
+
+    # Keep 409 retry short to speed up takeover.
+    _SLEEP_409_SECONDS = 1
+    _SLEEP_OTHER_ERROR_SECONDS = 3
+
 
     offset = 0
     while True:
@@ -1252,25 +1259,39 @@ def poll_updates():
             err_str = str(exc)
             if "409" in err_str or "Conflict" in err_str:
                 _consecutive_409 += 1
-                print(f"[telegram] 409 Conflict ({_consecutive_409}/{_MAX_CONSECUTIVE_409})"
-                      " — another instance is active")
-                if _consecutive_409 >= _MAX_CONSECUTIVE_409:
-                    print("[bot] New instance detected on another device. "
-                          "Yielding — this instance will exit now.")
+                uptime = time.time() - _boot_ts
+
+                # New instance: keep grabbing aggressively, do not exit.
+                if uptime <= _NEW_INSTANCE_GRAB_SECONDS:
+                    print(
+                        f"[telegram] 409 Conflict (startup-grab, "
+                        f"{_consecutive_409}) — retrying in {_SLEEP_409_SECONDS}s"
+                    )
+                    time.sleep(_SLEEP_409_SECONDS)
+                    continue
+
+                # Old instance: yield fast so the newer instance can take over.
+                print(
+                    f"[telegram] 409 Conflict (running {int(uptime)}s, "
+                    f"{_consecutive_409}/{_OLD_INSTANCE_YIELD_AFTER_409})"
+                )
+                if _consecutive_409 >= _OLD_INSTANCE_YIELD_AFTER_409:
+                    print("[bot] Newer instance detected. Exiting this older instance.")
                     try:
                         _BOT_PID_FILE.unlink(missing_ok=True)
                     except Exception:
                         pass
                     raise SystemExit(0)
-                time.sleep(5)
+
+                time.sleep(_SLEEP_409_SECONDS)
             else:
                 _consecutive_409 = 0
                 print(f"[telegram] Network error: {exc}")
-                time.sleep(5)
+                time.sleep(_SLEEP_OTHER_ERROR_SECONDS)
         except Exception as exc:
             _consecutive_409 = 0
             print(f"[telegram] Polling error: {exc}")
-            time.sleep(5)
+            time.sleep(_SLEEP_OTHER_ERROR_SECONDS)
 
 
 def main():
