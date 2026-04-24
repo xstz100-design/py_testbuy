@@ -501,49 +501,90 @@ def select_currency(page, currency: str) -> bool:
         page.wait_for_timeout(800)
 
     def _find_and_tap_currency() -> bool:
-        """Scan visible items and tap the matching currency row. Returns True on success."""
-        # 大小写不敏感：多种变体
+        """Find and tap the matching currency row using targeted selectors.
+        Strategy:
+          1. Playwright get_by_text(exact) on known currency item selectors
+          2. JS scan of .list-title / span elements (faster than .all() iteration)
+          3. Scroll down and retry up to 8 passes
+        """
         search_texts = list(dict.fromkeys([
             display, display.upper(), display.lower(),
-            display.capitalize(), display.title(),
-            currency.upper(), currency.lower(), currency.title(),
+            display.capitalize(), currency.upper(), currency.lower(),
         ]))
-        # 先滚回顶部
+
+        # Scroll to top first
         page.evaluate("""() => {
             (document.scrollingElement || document.body).scrollTo(0, 0);
-            document.querySelectorAll('div, section').forEach(el => {
-                if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 300)
+            document.querySelectorAll('*').forEach(el => {
+                if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 100)
                     el.scrollTo(0, 0);
             });
-            window.scrollTo(0, 0);
         }""")
-        page.wait_for_timeout(400)
+        page.wait_for_timeout(300)
 
-        for attempt in range(14):
+        for attempt in range(10):
             if attempt == 0:
                 close_market_popup(page)
-            spans = page.locator("span, div").all()
-            for el in spans:
+
+            # Strategy 1: Playwright native — exact text match on visible currency rows
+            for txt in search_texts:
                 try:
-                    text = el.text_content().strip()
-                    if text not in search_texts:
-                        continue
-                    box = el.bounding_box()
-                    if box and box["height"] > 20 and box["y"] >= 0:
-                        parent = el.locator("xpath=..").first
-                        parent.tap()
-                        return True
+                    # Target known currency list class names first
+                    for sel in [".list-title", ".coin-name", ".currency-name",
+                                 ".name", ".title", ".label"]:
+                        loc = page.locator(sel).filter(has_text=re.compile(
+                            rf"^{re.escape(txt)}$", re.I
+                        )).first
+                        if loc.count() > 0:
+                            box = loc.bounding_box()
+                            if box and box["y"] >= 0 and box["height"] > 10:
+                                loc.tap()
+                                print(f"  [currency] Tapped via selector {sel}: {txt}")
+                                return True
                 except Exception:
-                    continue
-            if attempt < 13:
-                # 前半程向下滚，后半程向上滚（来回扫一遍）
-                direction = 300 if attempt < 7 else -300
-                page.evaluate(f"""() => {{
-                    const c = document.scrollingElement || document.body;
-                    c.scrollBy({{top: {direction}, behavior: 'smooth'}});
-                    window.scrollBy({{top: {direction}, behavior: 'smooth'}});
-                }}""")
-                page.wait_for_timeout(700)
+                    pass
+
+            # Strategy 2: JS scan — only short text nodes (currency names are short)
+            found = page.evaluate("""(texts) => {
+                // Only look at elements with short text that match exactly
+                const candidates = document.querySelectorAll(
+                    '.list-title, .coin-name, .currency-name, .name, ' +
+                    'span[class], div[class*="name"], div[class*="title"], ' +
+                    'div[class*="coin"], div[class*="item"] span'
+                );
+                for (const el of candidates) {
+                    const t = (el.innerText || el.textContent || '').trim();
+                    if (!texts.includes(t.toUpperCase()) && !texts.includes(t)) continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 5 || r.height < 5 || r.y < 0) continue;
+                    // Tap the parent row if it's larger
+                    let target = el;
+                    const parent = el.parentElement;
+                    if (parent) {
+                        const pr = parent.getBoundingClientRect();
+                        if (pr.height > r.height && pr.width > 80) target = parent;
+                    }
+                    target.click();
+                    return t;
+                }
+                return null;
+            }""", [t.upper() for t in search_texts] + search_texts)
+            if found:
+                print(f"  [currency] Tapped via JS scan: {found}")
+                return True
+
+            # Scroll down to reveal more items (virtual list)
+            page.evaluate("""() => {
+                const body = document.scrollingElement || document.body;
+                body.scrollBy({top: 280, behavior: 'smooth'});
+                // Also scroll any overflow container
+                document.querySelectorAll('*').forEach(el => {
+                    if (el.scrollHeight > el.clientHeight + 80 && el.clientHeight > 150)
+                        el.scrollBy({top: 280, behavior: 'smooth'});
+                });
+            }""")
+            page.wait_for_timeout(600)
+
         return False
 
     # 找到并点击币种行

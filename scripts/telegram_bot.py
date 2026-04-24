@@ -734,55 +734,37 @@ class UserWorker:
                 self.send_result_with_screenshot(message, result, start_time)
             else:
                 send_message(
-                    task.chat_id, f"Batch started: {total_orders} orders (concurrent)", task.message_id,
+                    task.chat_id,
+                    f"Batch started: {total_orders} orders (queued, sequential)",
+                    task.message_id,
                 )
                 success_count = 0
                 fail_count = 0
 
-                # Max concurrent workers: up to 5 simultaneous browser processes
-                max_workers = min(total_orders, 5)
-
-                def _run_one(idx_order):
-                    i, order_text = idx_order
+                # Serial queue: one browser per account at a time.
+                # Orders run in the exact sequence provided.
+                for i, order_text in enumerate(orders, 1):
                     if self.stop_flag.is_set():
-                        return i, order_text, None, None
+                        send_message(task.chat_id, f"[{i}/{total_orders}] Stopped.")
+                        break
                     start_time = time.time()
-                    send_message(task.chat_id, f"[{i}/{total_orders}] Executing: {order_text}")
+                    send_message(
+                        task.chat_id, f"[{i}/{total_orders}] Executing: {order_text}"
+                    )
                     try:
-                        message, result = self.execute_single_order(
-                            order_text, concurrent=True
-                        )
-                        return i, order_text, message, result, start_time
-                    except Exception as e:
-                        return i, order_text, None, {"status": "error", "message": str(e)}, start_time
-
-                with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                    futures = {
-                        pool.submit(_run_one, (i, order_text)): i
-                        for i, order_text in enumerate(orders, 1)
-                    }
-                    for fut in as_completed(futures):
-                        try:
-                            outcome = fut.result()
-                        except Exception as e:
-                            fail_count += 1
-                            send_message(task.chat_id, f"Order error: {e}")
-                            continue
-                        if outcome[2] is None and outcome[3] is None:
-                            # stopped
-                            continue
-                        i, order_text, message, result, start_time = outcome
+                        message, result = self.execute_single_order(order_text)
                         if result and result.get("status") == "ok":
                             success_count += 1
                         else:
                             fail_count += 1
-                        if message:
-                            self.send_result_with_screenshot(
-                                f"[{i}/{total_orders}] {message}", result, start_time,
-                            )
-                        else:
-                            err = result.get("message", "unknown") if result else "unknown"
-                            send_message(task.chat_id, f"[{i}/{total_orders}] Error: {err}")
+                        self.send_result_with_screenshot(
+                            f"[{i}/{total_orders}] {message}", result, start_time,
+                        )
+                    except Exception as e:
+                        fail_count += 1
+                        send_message(
+                            task.chat_id, f"[{i}/{total_orders}] Error: {e}"
+                        )
 
                 send_message(
                     task.chat_id,
