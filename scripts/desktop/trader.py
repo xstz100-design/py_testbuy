@@ -227,98 +227,141 @@ def select_currency(page, currency: str) -> bool:
     display = get_display(currency)
     print(f"  [currency] Selecting {display}...")
 
-    wait_for_loading_gone(page)
-    
-    # 先关闭可能残留的下拉框
-    page.keyboard.press("Escape")
-    page.wait_for_timeout(300)
+    variants = list(dict.fromkeys([
+        display, display.upper(), display.lower(),
+        display.capitalize(), display.title(),
+    ]))
 
-    def _open_and_search(scroll_attempts: int = 15) -> tuple[bool, str]:
-        """Open dropdown, scroll through items looking for a match.
-        Returns (found, matched_display)."""
-        try:
-            page.locator(".ant-select").first.wait_for(
-                state="visible", timeout=TIMEOUT["element"]
-            )
-        except Exception:
-            return False, display
-        page.locator(".ant-select").first.click()
+    def _open_dropdown() -> bool:
+        """Open the currency dropdown. Returns True if dropdown appeared."""
+        # Try selector → .ant-select-selector → .ant-select (multiple fallbacks)
+        for sel in [".ant-select-selector", ".ant-select"]:
+            try:
+                el = page.locator(sel).first
+                if el.count() > 0:
+                    el.click(force=True)
+                    page.wait_for_timeout(250)
+                    if page.locator(".ant-select-dropdown").count() > 0:
+                        return True
+            except Exception:
+                pass
+        # Last resort: JS click
+        page.evaluate("""() => {
+            const el = document.querySelector('.ant-select-selector')
+                    || document.querySelector('.ant-select');
+            if (el) el.click();
+        }""")
         page.wait_for_timeout(300)
-        dropdown = page.locator(".ant-select-dropdown")
+        return page.locator(".ant-select-dropdown").count() > 0
 
-        # 先滚回顶部，确保从头开始找
+    def _click_item_in_dom() -> bool:
+        """Try to directly JS-click a matching item currently in the DOM."""
+        return page.evaluate("""(variants) => {
+            const items = document.querySelectorAll(
+                '.ant-select-item-option:not(.ant-select-item-option-disabled)');
+            for (const item of items) {
+                const title = (item.getAttribute('title') || '').trim();
+                const text  = item.textContent.trim();
+                for (const v of variants) {
+                    if (title.toLowerCase() === v.toLowerCase()
+                        || text.toLowerCase()  === v.toLowerCase()) {
+                        item.click();
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }""", variants)
+
+    def _type_to_filter() -> bool:
+        """Use combobox search input to filter, then click first match."""
+        combo = page.locator('[role="combobox"]').first
+        if combo.count() == 0 or not combo.is_visible():
+            return False
+        try:
+            combo.fill(display)
+            page.wait_for_timeout(350)
+        except Exception:
+            return False
+        # After filtering, click first visible option
+        if _click_item_in_dom():
+            return True
+        # Also try Playwright text selector on filtered list
+        for variant in variants:
+            item = page.locator(f'.ant-select-item[title="{variant}"]')
+            if item.count() > 0:
+                try:
+                    item.first.click()
+                    return True
+                except Exception:
+                    pass
+        return False
+
+    def _scroll_and_find(scroll_steps: int = 20) -> bool:
+        """Scroll through virtual list to find item."""
+        # Reset scroll to top first
         page.evaluate("""() => {
             const h = document.querySelector('.rc-virtual-list-holder')
                    || document.querySelector('.ant-select-dropdown');
             if (h && h.scrollTo) h.scrollTo({top: 0, behavior: 'instant'});
         }""")
-        page.wait_for_timeout(150)
+        page.wait_for_timeout(100)
+        for _ in range(scroll_steps):
+            if _click_item_in_dom():
+                return True
+            page.evaluate("""() => {
+                const h = document.querySelector(
+                    '.ant-select-dropdown .rc-virtual-list-holder')
+                    || document.querySelector('.ant-select-dropdown');
+                if (h) h.scrollBy({top: 100, behavior: 'instant'});
+            }""")
+            page.wait_for_timeout(DELAYS["dropdown_scroll"])
+        return False
 
-        variants = list(dict.fromkeys([
-            display, display.upper(), display.lower(),
-            display.capitalize(), display.title(),
-        ]))
-
-        for attempt in range(scroll_attempts):
-            # 方法1: 精确匹配 title 属性
-            item = page.locator(f'.ant-select-item[title="{display}"]')
-            if item.count() > 0 and item.is_visible():
-                item.click()
-                return True, display
-
-            # 方法2: 大小写变体匹配 (title 或 text-is)
-            for variant in variants:
-                item = page.locator(f'.ant-select-item[title="{variant}"]')
-                if item.count() > 0 and item.is_visible():
-                    item.click()
-                    return True, variant
-                text_item = dropdown.locator(
-                    f'.ant-select-item-option-content:text-is("{variant}")')
-                if text_item.count() > 0 and text_item.is_visible():
-                    text_item.click()
-                    return True, variant
-
-            if attempt < scroll_attempts - 1:
-                page.evaluate("""() => {
-                    const dd = document.querySelector(
-                        '.ant-select-dropdown .rc-virtual-list-holder')
-                        || document.querySelector('.ant-select-dropdown');
-                    if (dd) dd.scrollBy({top: 120, behavior: 'auto'});
-                }""")
-                page.wait_for_timeout(DELAYS["dropdown_scroll"])
-
-        page.keyboard.press("Escape")
-        return False, display
-
-    # 第一次尝试
-    found, matched_display = _open_and_search(scroll_attempts=15)
-
-    # 首次失败 → 关掉下拉框稍等，重新打开再试一次（防止页面未稳定）
-    if not found:
-        print(f"  [currency] First pass failed, retrying...")
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(500)
+    def _try_once() -> bool:
         wait_for_loading_gone(page)
-        found, matched_display = _open_and_search(scroll_attempts=15)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
 
-    if not found:
-        print(f"  [currency] FAIL: {display} not found in dropdown")
+        if not _open_dropdown():
+            print("  [currency] Dropdown did not open, retrying open...")
+            page.wait_for_timeout(300)
+            _open_dropdown()
+
+        # Path 1: direct JS click (fastest — no scroll needed if item already in DOM)
+        if _click_item_in_dom():
+            return True
+
+        # Path 2: type to filter (combobox search)
+        if _type_to_filter():
+            return True
+
+        # Path 3: scroll through virtual list
+        if _scroll_and_find(scroll_steps=20):
+            return True
+
+        page.keyboard.press("Escape")
         return False
 
-    page.keyboard.press("Escape")
-    page.wait_for_timeout(DELAYS["input_verify"])
+    # Up to 3 attempts
+    for attempt in range(3):
+        if attempt > 0:
+            print(f"  [currency] Retry {attempt}...")
+            page.wait_for_timeout(400)
+        if _try_once():
+            page.wait_for_timeout(200)
+            # Verify selection
+            selected = page.locator(".ant-select-selection-item").first
+            actual = selected.text_content().strip() if selected.count() > 0 else ""
+            if actual.upper() == display.upper():
+                print(f"  [currency] ✓ Verified: {actual}")
+                page.wait_for_timeout(DELAYS["spa_switch"])
+                return True
+            else:
+                print(f"  [currency] Verify failed: got '{actual}', expected '{display}'")
 
-    # ── 验证（大小写不敏感）──
-    selected = page.locator(".ant-select-selection-item").first
-    actual = selected.text_content().strip() if selected.count() > 0 else ""
-    if actual.upper() == display.upper():
-        print(f"  [currency] ✓ Verified: {actual}")
-        # 等待 SPA 完成切币后页面重渲染，避免 amount 被重置
-        page.wait_for_timeout(DELAYS["spa_switch"])
-        return True
-    else:
-        print(f"  [currency] FAIL: Expected {display}, got '{actual}'")
-        return False
+    print(f"  [currency] FAIL: {display} not found after 3 attempts")
+    return False
 # ═══════════════════════════════════════
 #  Step 2: Enter Amount + Verify
 # ═══════════════════════════════════════
