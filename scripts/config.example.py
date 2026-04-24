@@ -1,12 +1,16 @@
-# BPTrading Configuration
-# Copy this file to config.py and fill in your credentials
+# BPTrading Configuration — SENSITIVE (gitignored)
+# Copy this file to config.py and fill in your credentials.
+# Currency data and normalization helpers live in config_utils.py (no edit needed).
 
+# ── Credentials ──────────────────────────────────────────
 ACCOUNT = "your_account"
 PASSWORD = "your_password"
+
+# ── Site URLs ─────────────────────────────────────────────
 BASE_URL = "https://bptradinguk.com"
 TRADE_URL = "https://bptradinguk.com/#/trade"
 
-# Speed mode: "fast" = minimum delays, "normal" = safer delays
+# ── Speed mode: "fast" = minimum delays, "normal" = safer ─
 SPEED_MODE = "fast"
 
 BROWSER = {
@@ -19,7 +23,6 @@ TIMEOUT = {
     "element": 10000 if SPEED_MODE == "fast" else 20000,
 }
 
-# Delays in milliseconds (configurable per speed mode)
 DELAYS = {
     "page_load": 1500 if SPEED_MODE == "fast" else 3000,
     "dropdown_scroll": 100 if SPEED_MODE == "fast" else 200,
@@ -27,6 +30,32 @@ DELAYS = {
     "input_verify": 200 if SPEED_MODE == "fast" else 400,
     "popup_check": 300 if SPEED_MODE == "fast" else 600,
 }
+
+STABILITY = {
+    "log_max_bytes": 10 * 1024 * 1024,
+    "log_backup_count": 5,
+    "browser_restart_interval": 20,
+    "network_retry_count": 3,
+    "network_retry_delay": 5,
+    "heartbeat_interval": 300,
+    "memory_warning_mb": 1024,
+    "screenshot_retention_days": 1,
+}
+
+# ── Telegram ──────────────────────────────────────────────
+TELEGRAM_BOT_TOKEN = "your_telegram_bot_token"
+TELEGRAM_ALLOWED_CHAT_IDS = []  # Empty = allow all; add chat IDs to whitelist
+
+# ── Re-export from config_utils (backward compatibility) ──
+from config_utils import (  # noqa: E402
+    TRADE_DEFAULTS,
+    CURRENCY_CATEGORIES,
+    DISPLAY_NAMES,
+    CURRENCY_ALIASES,
+    get_display,
+    get_category,
+    normalize_currency,
+)
 
 # Long-term stability config
 STABILITY = {
@@ -100,66 +129,3 @@ def get_display(currency):
 
 def get_category(currency):
     return CURRENCY_CATEGORIES.get(currency.upper(), "crypto")
-
-
-# Aliases for common typos / case variations → canonical name
-# Keys must be lowercase for case-insensitive matching
-CURRENCY_ALIASES: dict[str, str] = {
-    # Crude Oil (WTI)
-    "crude oil":   "CRUDE OIL",
-    "crudeoil":    "CRUDE OIL",
-    "crude_oil":   "CRUDE OIL",
-    "crude-oil":   "CRUDE OIL",
-    "crude":       "CRUDE OIL",
-    "wti":         "CRUDE OIL",
-    "oil":         "CRUDE OIL",
-    "usoil":       "CRUDE OIL",
-    "us oil":      "CRUDE OIL",
-    "wti oil":     "CRUDE OIL",
-    # Brent Oil
-    "brent oil":   "BRENT OIL",
-    "brentoil":    "BRENT OIL",
-    "brent_oil":   "BRENT OIL",
-    "brent-oil":   "BRENT OIL",
-    "brent":       "BRENT OIL",
-    "ukoil":       "BRENT OIL",
-    "uk oil":      "BRENT OIL",
-    "brent crude": "BRENT OIL",
-    # Gold
-    "gold":        "GOLD",
-    "xau":         "GOLD",
-    "xauusd":      "GOLD",
-    "xau/usd":     "GOLD",
-    # Silver
-    "silver":      "SILVER",
-    "xag":         "SILVER",
-    "xagusd":      "SILVER",
-    "xag/usd":     "SILVER",
-}
-
-
-def normalize_currency(currency: str) -> str:
-    """Normalize user input to the canonical currency name.
-    Handles common typos, abbreviations, case variations, and near-typos via fuzzy matching."""
-    import difflib
-    key = currency.strip().lower()
-
-    # 1. Exact alias match
-    if key in CURRENCY_ALIASES:
-        return CURRENCY_ALIASES[key]
-
-    # 2. Exact canonical match (e.g. "BTC", "ETH")
-    upper = currency.strip().upper()
-    if upper in CURRENCY_CATEGORIES:
-        return upper
-
-    # 3. Fuzzy match against all known canonical names
-    all_canonical = list(CURRENCY_CATEGORIES.keys())
-    candidates = {v for v in CURRENCY_ALIASES.values()} | set(all_canonical)
-    matches = difflib.get_close_matches(upper, candidates, n=1, cutoff=0.6)
-    if matches:
-        print(f"[normalize] Fuzzy matched '{currency}' -> '{matches[0]}'")
-        return matches[0]
-
-    # 4. Fallback: return uppercased as-is
-    return upper
