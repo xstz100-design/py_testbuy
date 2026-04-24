@@ -694,34 +694,43 @@ def click_direction(page, direction: str):
     cls = ".up-btn" if direction == "up" else ".down-btn"
     print(f"  [direction] Tapping {direction.upper()}...")
 
-    close_market_popup(page)
-    wait_for_loading_gone(page)
+    for attempt in range(3):
+        if attempt > 0:
+            print(f"  [direction] Retry {attempt}...")
+            page.wait_for_timeout(600 + attempt * 400)
 
-    btn = page.locator(cls).first
-    try:
-        btn.wait_for(state="visible", timeout=10000)
-        btn.tap()
-    except Exception:
+        close_market_popup(page)
+        wait_for_loading_gone(page)
+
+        btn = page.locator(cls).first
         try:
-            page.get_by_text(re.compile(
-                rf"^\s*{direction}\s*$", re.I)).last.tap(timeout=5000)
+            btn.wait_for(state="visible", timeout=10000)
+            btn.tap()
         except Exception:
-            print(f"  [direction] FAIL: {direction.upper()} button not found")
-            return 0.0
+            try:
+                page.get_by_text(re.compile(
+                    rf"^\s*{direction}\s*$", re.I)).last.tap(timeout=5000)
+            except Exception:
+                if attempt < 2:
+                    continue
+                print(f"  [direction] FAIL: {direction.upper()} button not found")
+                return 0.0
 
-    page.wait_for_timeout(800)
+        page.wait_for_timeout(800)
 
-    # ── 验证进入 ACTIVE 状态 ──
-    state = get_page_state(page)
-    if state == "active":
-        trade_start = time.time()
-        print(f"  [direction] ✓ Order placed, trade ACTIVE")
-        # 立即安装 MutationObserver 捕获结算弹窗
-        _install_settlement_observer(page)
-        return trade_start
-    else:
-        print(f"  [direction] FAIL: Expected ACTIVE, got '{state}'")
-        return 0.0
+        # ── 验证进入 ACTIVE 状态 ──
+        state = get_page_state(page)
+        if state == "active":
+            trade_start = time.time()
+            print(f"  [direction] ✓ Order placed, trade ACTIVE (attempt {attempt + 1})")
+            # 立即安装 MutationObserver 捕获结算弹窗
+            _install_settlement_observer(page)
+            return trade_start
+        if attempt < 2:
+            print(f"  [direction] State '{state}' after attempt {attempt + 1}, retrying...")
+
+    print(f"  [direction] FAIL: Expected ACTIVE after 3 attempts")
+    return 0.0
 
 
 def _install_settlement_observer(page):

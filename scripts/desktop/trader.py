@@ -482,39 +482,45 @@ def select_duration(page, duration: str) -> bool:
     dur_text = f"{duration}s"
     print(f"  [duration] Selecting {dur_text}...")
 
-    clicked = page.evaluate("""(dur) => {
-        const target = dur + 's';
-        for (const el of document.querySelectorAll('*')) {
-            const own = Array.from(el.childNodes)
-                .filter(n => n.nodeType === 3)
-                .map(n => n.textContent.trim()).join('');
-            if (own === target) { el.click(); return true; }
-        }
-        for (const el of document.querySelectorAll('*')) {
-            const t = el.textContent.trim();
-            const r = el.getBoundingClientRect();
-            if ((t === target || t.startsWith(target))
-                && r.width > 20 && r.width < 150 && r.height < 60) {
-                el.click(); return true;
+    def _try_click() -> bool:
+        clicked = _safe_eval(page, """(dur) => {
+            const target = dur + 's';
+            for (const el of document.querySelectorAll('*')) {
+                const own = Array.from(el.childNodes)
+                    .filter(n => n.nodeType === 3)
+                    .map(n => n.textContent.trim()).join('');
+                if (own === target) { el.click(); return true; }
             }
-        }
-        return false;
-    }""", duration)
-
-    if not clicked:
+            for (const el of document.querySelectorAll('*')) {
+                const t = el.textContent.trim();
+                const r = el.getBoundingClientRect();
+                if ((t === target || t.startsWith(target))
+                    && r.width > 20 && r.width < 150 && r.height < 60) {
+                    el.click(); return true;
+                }
+            }
+            return false;
+        }""", duration, default=False)
+        if clicked:
+            return True
         btn = page.get_by_text(dur_text, exact=True)
         if btn.count() > 0:
             btn.first.click()
-            clicked = True
-
-    page.wait_for_timeout(300)
-
-    if clicked:
-        print(f"  [duration] ✓ Selected {dur_text}")
-        return True
-    else:
-        print(f"  [duration] FAIL: {dur_text} not found")
+            return True
         return False
+
+    for attempt in range(3):
+        wait_for_loading_gone(page)
+        if _try_click():
+            page.wait_for_timeout(300)
+            print(f"  [duration] ✓ Selected {dur_text}")
+            return True
+        if attempt < 2:
+            print(f"  [duration] Retry {attempt + 1}...")
+            page.wait_for_timeout(400)
+
+    print(f"  [duration] FAIL: {dur_text} not found after 3 attempts")
+    return False
 
 
 # ═══════════════════════════════════════
@@ -702,35 +708,47 @@ def run(currency, amount, duration, direction, rounds):
                 print(f"\n=== Round {r}/{rounds}: "
                       f"{display} {amount} {d} {duration}s ===")
 
-                # ── Step 0: 恢复页面 + 确保 IDLE ──
-                _recover_to_trade_page(page, context)
-                ensure_idle(page)
+                last_err = None
+                MAX_RETRIES = 3
+                for retry in range(MAX_RETRIES):
+                    if retry > 0:
+                        print(f"  [retry] Round {r} attempt {retry + 1}/{MAX_RETRIES}...")
+                        page.wait_for_timeout(1500)
 
-                # ── Step 1: 选币种（失败→恢复→重试一次）──
-                if not select_currency(page, currency):
-                    print("  [round] Currency failed, attempting page recovery...")
-                    _recover_to_trade_page(page, context)
-                    page.wait_for_timeout(500)
-                    ensure_idle(page)
-                    if not select_currency(page, currency):
-                        raise RuntimeError(f"Currency {display} selection failed")
+                    try:
+                        # ── Step 0: 恢复页面 + 确保 IDLE ──
+                        _recover_to_trade_page(page, context)
+                        ensure_idle(page)
 
-                # ── Step 2: 设金额 ──
-                if not enter_amount(page, amount):
-                    raise RuntimeError(f"Amount {amount} setting failed")
+                        # ── Step 1: 选币种 ──
+                        if not select_currency(page, currency):
+                            raise RuntimeError(f"Currency {display} selection failed")
 
-                # ── Step 3: 选时长 ──
-                if not select_duration(page, duration):
-                    raise RuntimeError(f"Duration {duration}s selection failed")
+                        # ── Step 2: 设金额 ──
+                        if not enter_amount(page, amount):
+                            raise RuntimeError(f"Amount {amount} setting failed")
 
-                # ── Step 4: 下单 ──
-                if not click_direction(page, direction):
-                    raise RuntimeError("Order placement failed")
-                trade_start = time.time()
+                        # ── Step 3: 选时长 ──
+                        if not select_duration(page, duration):
+                            raise RuntimeError(f"Duration {duration}s selection failed")
 
-                # ── Step 5: 等待结算 ──
-                result = wait_for_result(page, duration, trade_start)
-                results.append(result)
+                        # ── Step 4: 下单 ──
+                        if not click_direction(page, direction):
+                            raise RuntimeError("Order placement failed")
+                        trade_start = time.time()
+
+                        # ── Step 5: 等待结算 ──
+                        result = wait_for_result(page, duration, trade_start)
+                        results.append(result)
+                        last_err = None
+                        break  # success
+                    except RuntimeError as e:
+                        last_err = e
+                        print(f"  [retry] Step failed: {e}")
+                        continue
+
+                if last_err:
+                    raise last_err
 
                 if r < rounds:
                     ensure_idle(page)
