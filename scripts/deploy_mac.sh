@@ -95,7 +95,7 @@ if [ -d "$PROJECT_DIR/.git" ]; then
 fi
 
 # ── 1. Check Python 3.10+ ──
-info "Checking Python..."
+info "[STEP 1] Checking Python..."
 if command -v python3 &>/dev/null; then
     PY="python3"
 elif command -v python &>/dev/null; then
@@ -114,8 +114,9 @@ fi
 info "Python $PY_VERSION OK"
 
 # ── 2. Create virtual environment ──
+info "[STEP 2] Virtual environment..."
 if [ ! -d "$VENV_DIR" ]; then
-    info "Creating virtual environment..."
+    info "  Creating virtual environment..."
     $PY -m venv "$VENV_DIR"
     info "Virtual environment created at $VENV_DIR"
 else
@@ -126,21 +127,24 @@ VENV_PY="$VENV_DIR/bin/python3"
 VENV_PIP="$VENV_DIR/bin/pip"
 
 # ── 3. Upgrade pip ──
-info "Upgrading pip..."
+info "[STEP 3] Upgrading pip..."
 $VENV_PY -m pip install --upgrade pip -q
 
 # ── 4. Install dependencies ──
-info "Installing dependencies..."
+info "[STEP 4] Installing dependencies..."
+if [ ! -f "$PROJECT_DIR/requirements.txt" ]; then
+    error "requirements.txt not found at $PROJECT_DIR/requirements.txt"
+fi
 $VENV_PIP install -r "$PROJECT_DIR/requirements.txt" -q
-info "Dependencies installed"
+info "  Dependencies installed"
 
 # ── 5. Install Playwright browsers ──
-info "Installing Playwright Chromium browser..."
+info "[STEP 5] Installing Playwright Chromium..."
 $VENV_PY -m playwright install chromium
 info "Chromium installed"
 
 # ── 6. Install Playwright system dependencies ──
-info "Installing Playwright system deps (may require sudo)..."
+info "[STEP 6] Playwright system deps..."
 $VENV_PY -m playwright install-deps chromium 2>/dev/null || {
     warn "Could not auto-install system deps. If browser fails, run:"
     warn "  $VENV_PY -m playwright install-deps chromium"
@@ -183,7 +187,7 @@ chmod +x "$SCRIPT_DIR/stop_bot_mac.sh" 2>/dev/null || true
 chmod +x "$SCRIPT_DIR/deploy_mac.sh" 2>/dev/null || true
 
 # ── 12. Verify installation ──
-info "Verifying installation..."
+info "[STEP 12] Verifying installation..."
 $VENV_PY -c "
 import sys
 print(f'  Python: {sys.version}')
