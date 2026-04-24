@@ -17,7 +17,7 @@ _INSTANCE_DIR = os.environ.get("BP_INSTANCE_DIR")
 if _INSTANCE_DIR:
     sys.path.insert(0, str(Path(_INSTANCE_DIR).resolve()))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import TRADE_DEFAULTS
+from config import TRADE_DEFAULTS, normalize_currency
 
 
 def main():
@@ -32,6 +32,9 @@ def main():
     parser.add_argument("--account", default=None, help="Override account")
     parser.add_argument("--password", default=None, help="Override password")
     args = parser.parse_args()
+
+    # Normalize currency (handles typos, aliases, case)
+    currency = normalize_currency(args.currency)
 
     # Normalize direction to lowercase
     direction = args.direction.lower()
@@ -52,7 +55,7 @@ def main():
     else:
         from mobile.trader import run
 
-    run(args.currency, args.amount, args.duration, direction, args.rounds)
+    run(currency, args.amount, args.duration, direction, args.rounds)
 
 
 if __name__ == "__main__":
