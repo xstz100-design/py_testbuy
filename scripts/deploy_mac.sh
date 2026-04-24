@@ -5,7 +5,7 @@
 #  Usage: bash deploy_mac.sh
 # ============================================================
 set -e
-trap 'echo -e "\033[0;31m[ERROR]\033[0m Deploy failed at line $LINENO"' ERR
+trap 'echo "[ERROR] Deploy failed at line $LINENO (cmd: $BASH_COMMAND)" >&2' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -18,7 +18,7 @@ NC='\033[0m'
 
 info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+error() { echo "[ERROR] $1" >&2; exit 1; }
 
 echo ""
 echo "============================================"
@@ -125,6 +125,14 @@ fi
 
 VENV_PY="$VENV_DIR/bin/python3"
 VENV_PIP="$VENV_DIR/bin/pip"
+
+# Verify venv binaries exist
+if [ ! -x "$VENV_PY" ]; then
+    error "venv python3 not found: $VENV_PY (try deleting .venv and re-running)"
+fi
+if [ ! -x "$VENV_PIP" ]; then
+    error "venv pip not found: $VENV_PIP (try deleting .venv and re-running)"
+fi
 
 # ── 3. Upgrade pip ──
 info "[STEP 3] Upgrading pip..."
