@@ -1251,7 +1251,6 @@ def main():
         raise SystemExit("TELEGRAM_BOT_TOKEN is required")
 
     # ── Single-instance lock ──
-    import fcntl  # noqa: F401 — Unix only; falls back on Windows
     _PID_FILE = DATA_DIR / ".bot.pid"
     _lock_fh = None
 
