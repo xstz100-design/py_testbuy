@@ -209,39 +209,98 @@ def _dismiss_blocking_popup(page):
 # ═══════════════════════════════════════
 #  Phase 1: Desktop Login
 # ═══════════════════════════════════════
-def desktop_login(playwright):
-    print("[phase1] Desktop login via Chromium...")
-    browser = playwright.chromium.launch(headless=True)
-    ctx = browser.new_context(viewport={"width": 1440, "height": 900})
-    page = ctx.new_page()
+_AUTH_CACHE_TTL = 90  # seconds — skip re-login if auth.json is this fresh
 
-    # Connection retry: up to 3 attempts
-    for attempt in range(3):
+
+def _try_acquire_login_lock(lock_path: Path, timeout: int = 35) -> bool:
+    """Atomically create a lock file (cross-platform, multi-process safe).
+    Returns True if lock acquired, False on timeout."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
         try:
-            page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=30000)
-            break
-        except Exception as e:
-            if attempt < 2:
-                print(f"  [conn] Attempt {attempt + 1} failed: {e}, retrying...")
-                page.wait_for_timeout(3000)
-            else:
-                raise
-    page.wait_for_timeout(2000)
+            # O_CREAT | O_EXCL is atomic — fails if file already exists
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            # Check if lock holder is still alive (stale lock cleanup)
+            try:
+                pid = int(lock_path.read_text().strip())
+                import signal
+                os.kill(pid, 0)  # signal 0 = check existence only
+            except (ProcessLookupError, ValueError, OSError):
+                # Stale lock — remove and retry
+                try:
+                    lock_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            time.sleep(0.5)
+    return False
 
-    if page.locator('input[type="password"]').count() > 0:
-        print("  [login] Filling credentials...")
-        inputs = page.locator("input")
-        inputs.nth(0).fill(ACCOUNT)
-        inputs.nth(1).fill(PASSWORD)
-        page.locator("button").first.click()
-        page.wait_for_timeout(3000)
-        print("  [login] Done")
-    else:
-        print("  [login] Session valid")
 
-    ctx.storage_state(path=str(AUTH_FILE))
-    print(f"  [session] Saved to {AUTH_FILE}")
-    browser.close()
+def desktop_login(playwright):
+    """Login with cross-process file lock + freshness cache.
+    Concurrent workers skip login if auth.json was written < 90s ago."""
+    lock_path = AUTH_FILE.with_suffix(".lock")
+
+    # Fast path: auth.json is fresh — skip login entirely
+    if AUTH_FILE.exists():
+        age = time.time() - AUTH_FILE.stat().st_mtime
+        if age < _AUTH_CACHE_TTL:
+            print(f"[phase1] Session cache valid ({age:.0f}s old), skipping login")
+            return
+
+    # Slow path: need to login — serialize with file lock
+    if not _try_acquire_login_lock(lock_path):
+        print("[phase1] Login lock timeout — continuing with existing auth.json")
+        return
+
+    try:
+        # Double-check after acquiring lock (another process may have just finished)
+        if AUTH_FILE.exists():
+            age = time.time() - AUTH_FILE.stat().st_mtime
+            if age < _AUTH_CACHE_TTL:
+                print(f"[phase1] Session cache valid after lock ({age:.0f}s old), skipping login")
+                return
+
+        print("[phase1] Desktop login via Chromium...")
+        browser = playwright.chromium.launch(headless=True)
+        ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+        page = ctx.new_page()
+
+        # Connection retry: up to 3 attempts
+        for attempt in range(3):
+            try:
+                page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=30000)
+                break
+            except Exception as e:
+                if attempt < 2:
+                    print(f"  [conn] Attempt {attempt + 1} failed: {e}, retrying...")
+                    page.wait_for_timeout(3000)
+                else:
+                    raise
+        page.wait_for_timeout(2000)
+
+        if page.locator('input[type="password"]').count() > 0:
+            print("  [login] Filling credentials...")
+            inputs = page.locator("input")
+            inputs.nth(0).fill(ACCOUNT)
+            inputs.nth(1).fill(PASSWORD)
+            page.locator("button").first.click()
+            page.wait_for_timeout(3000)
+            print("  [login] Done")
+        else:
+            print("  [login] Session valid")
+
+        ctx.storage_state(path=str(AUTH_FILE))
+        print(f"  [session] Saved to {AUTH_FILE}")
+        browser.close()
+    finally:
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 # ═══════════════════════════════════════
