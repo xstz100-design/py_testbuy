@@ -5,6 +5,7 @@
 #  Usage: bash deploy_mac.sh
 # ============================================================
 set -e
+trap 'echo -e "\033[0;31m[ERROR]\033[0m Deploy failed at line $LINENO"' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -191,7 +192,10 @@ try:
     print(f'  Playwright: {pkg_version(\"playwright\")}')
 except Exception:
     print('  Playwright: installed')
-import psutil; print(f'  psutil: {psutil.__version__}')
+try:
+    import psutil; print(f'  psutil: {psutil.__version__}')
+except ImportError:
+    print('  psutil: not installed (optional)')
 print('  All OK!')
 "
 
