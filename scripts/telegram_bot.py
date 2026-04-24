@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -656,7 +657,8 @@ class UserWorker:
         finally:
             self.current_process = None
 
-    def execute_single_order(self, order_text: str) -> tuple[str, dict]:
+    def execute_single_order(self, order_text: str,
+                              concurrent: bool = False) -> tuple[str, dict]:
         order = parse_order_line(order_text)
         if order is None:
             raise ValueError(f"Invalid order: {order_text}")
@@ -674,13 +676,19 @@ class UserWorker:
         if acc:
             command.extend(["--account", acc["account"], "--password", acc["password"]])
 
-        # Serialize trades on the same website account
-        lock = _get_account_lock(account)
-        print(f"[lock][{self.chat_id}] Waiting for account lock: {account}")
-        with lock:
-            print(f"[lock][{self.chat_id}] Acquired account lock: {account}")
+        if concurrent:
+            # Concurrent batch: each order is a separate browser process,
+            # no shared state → no need to serialize via account lock
+            print(f"[concurrent][{self.chat_id}] Launching: {order_text}")
             _, result = self.run_command(command, timeout=300)
-        print(f"[lock][{self.chat_id}] Released account lock: {account}")
+        else:
+            # Single order: serialize on account to avoid race conditions
+            lock = _get_account_lock(account)
+            print(f"[lock][{self.chat_id}] Waiting for account lock: {account}")
+            with lock:
+                print(f"[lock][{self.chat_id}] Acquired account lock: {account}")
+                _, result = self.run_command(command, timeout=300)
+            print(f"[lock][{self.chat_id}] Released account lock: {account}")
         message = format_single_result(result, order_text)
         return message, result
 
@@ -719,30 +727,56 @@ class UserWorker:
                 self.send_result_with_screenshot(message, result, start_time)
             else:
                 send_message(
-                    task.chat_id, f"Batch started: {total_orders} orders", task.message_id,
+                    task.chat_id, f"Batch started: {total_orders} orders (concurrent)", task.message_id,
                 )
                 success_count = 0
                 fail_count = 0
-                for i, order_text in enumerate(orders, 1):
+
+                # Max concurrent workers: up to 5 simultaneous browser processes
+                max_workers = min(total_orders, 5)
+
+                def _run_one(idx_order):
+                    i, order_text = idx_order
                     if self.stop_flag.is_set():
-                        send_message(task.chat_id, f"Batch stopped at {i}/{total_orders}")
-                        break
+                        return i, order_text, None, None
                     start_time = time.time()
                     send_message(task.chat_id, f"[{i}/{total_orders}] Executing: {order_text}")
                     try:
-                        message, result = self.execute_single_order(order_text)
-                        if result.get("status") == "ok":
+                        message, result = self.execute_single_order(
+                            order_text, concurrent=True
+                        )
+                        return i, order_text, message, result, start_time
+                    except Exception as e:
+                        return i, order_text, None, {"status": "error", "message": str(e)}, start_time
+
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    futures = {
+                        pool.submit(_run_one, (i, order_text)): i
+                        for i, order_text in enumerate(orders, 1)
+                    }
+                    for fut in as_completed(futures):
+                        try:
+                            outcome = fut.result()
+                        except Exception as e:
+                            fail_count += 1
+                            send_message(task.chat_id, f"Order error: {e}")
+                            continue
+                        if outcome[2] is None and outcome[3] is None:
+                            # stopped
+                            continue
+                        i, order_text, message, result, start_time = outcome
+                        if result and result.get("status") == "ok":
                             success_count += 1
                         else:
                             fail_count += 1
-                        self.send_result_with_screenshot(
-                            f"[{i}/{total_orders}] {message}", result, start_time,
-                        )
-                    except Exception as e:
-                        fail_count += 1
-                        send_message(task.chat_id, f"[{i}/{total_orders}] Error: {e}")
-                    if delay > 0 and i < total_orders:
-                        time.sleep(delay)
+                        if message:
+                            self.send_result_with_screenshot(
+                                f"[{i}/{total_orders}] {message}", result, start_time,
+                            )
+                        else:
+                            err = result.get("message", "unknown") if result else "unknown"
+                            send_message(task.chat_id, f"[{i}/{total_orders}] Error: {err}")
+
                 send_message(
                     task.chat_id,
                     f"Batch completed: {success_count} OK / {fail_count} Failed",

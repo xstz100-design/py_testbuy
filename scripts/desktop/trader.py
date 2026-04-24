@@ -59,15 +59,15 @@ def wait_for_loading_gone(page, timeout_ms: int = 5000):
     try:
         page.wait_for_function(
             """() => {
-                const selectors = ['.loading', '.loading-mask', '.ant-spin', 
+                const selectors = ['.loading', '.loading-mask', '.ant-spin',
                     '[class*="loading"]', '[class*="spinner"]', '.overlay'];
                 for (const sel of selectors) {
                     const el = document.querySelector(sel);
                     if (el) {
                         const r = el.getBoundingClientRect();
                         const s = getComputedStyle(el);
-                        if (r.width > 0 && r.height > 0 
-                            && s.display !== 'none' 
+                        if (r.width > 0 && r.height > 0
+                            && s.display !== 'none'
                             && s.visibility !== 'hidden'
                             && s.opacity !== '0') {
                             return false;
@@ -79,7 +79,7 @@ def wait_for_loading_gone(page, timeout_ms: int = 5000):
             timeout=timeout_ms,
         )
     except Exception:
-        page.evaluate("""() => {
+        _safe_eval(page, """() => {
             const selectors = ['.loading', '.loading-mask', '.ant-spin',
                 '[class*="loading"]', '[class*="spinner"]', '.overlay'];
             for (const sel of selectors) {
@@ -90,17 +90,29 @@ def wait_for_loading_gone(page, timeout_ms: int = 5000):
                 });
             }
         }""")
-        print("  [loading] Force removed loading overlay")
         page.wait_for_timeout(200)
 
 
 # ═══════════════════════════════════════
 #  状态检测
 # ═══════════════════════════════════════
+def _safe_eval(page, js, arg=None, default=None):
+    """page.evaluate() wrapper — returns `default` on navigation/context errors."""
+    try:
+        return page.evaluate(js, arg) if arg is not None else page.evaluate(js)
+    except Exception:
+        return default
+
+
 def get_page_state(page) -> str:
-    """返回页面当前状态: idle / active / result"""
-    # 用 JS 检测弹窗是否真正可见（排除 display:none 的残留元素）
-    has_result = page.evaluate("""() => {
+    """返回页面当前状态: idle / active / result / login"""
+    # Quick login-page check first (avoid mis-reading ant-select on login)
+    try:
+        if page.locator('input[type="password"]').count() > 0:
+            return "login"
+    except Exception:
+        pass
+    has_result = _safe_eval(page, """() => {
         for (const el of document.querySelectorAll('*')) {
             if (el.textContent.trim() === 'Trade result') {
                 const r = el.getBoundingClientRect();
@@ -114,13 +126,16 @@ def get_page_state(page) -> str:
             }
         }
         return false;
-    }""")
+    }""", default=False)
     if has_result:
         return "result"
-    if page.locator("text=Expiration time").count() > 0:
-        return "active"
-    if page.locator("text=Estimate profit").count() > 0:
-        return "active"
+    try:
+        if page.locator("text=Expiration time").count() > 0:
+            return "active"
+        if page.locator("text=Estimate profit").count() > 0:
+            return "active"
+    except Exception:
+        pass
     return "idle"
 
 
@@ -155,7 +170,7 @@ def ensure_idle(page, timeout_s: int = 120):
 
 def _close_result_popup(page):
     # 方法1: JS click close 按钮
-    page.evaluate("""() => {
+    _safe_eval(page, """() => {
         const el = document.querySelector('.stx-ico-close');
         if (el) { el.click(); return; }
         const d = document.querySelector('[class*="TradeResultDialog"]');
@@ -163,13 +178,16 @@ def _close_result_popup(page):
     }""")
     page.wait_for_timeout(700)
     # 方法2: 如果弹窗还在，点击空白区域或 X
-    if page.get_by_text("Trade result").count() > 0:
-        page.evaluate("""() => {
-            document.querySelectorAll('.stx-ico-close').forEach(e => e.click());
-            const overlay = document.querySelector('.ant-modal-wrap, .popup-overlay');
-            if (overlay) overlay.click();
-        }""")
-        page.wait_for_timeout(500)
+    try:
+        if page.get_by_text("Trade result").count() > 0:
+            _safe_eval(page, """() => {
+                document.querySelectorAll('.stx-ico-close').forEach(e => e.click());
+                const overlay = document.querySelector('.ant-modal-wrap, .popup-overlay');
+                if (overlay) overlay.click();
+            }""")
+            page.wait_for_timeout(500)
+    except Exception:
+        pass
     # 方法3: Playwright force click
     try:
         close_x = page.locator(".stx-ico-close")
@@ -178,6 +196,50 @@ def _close_result_popup(page):
     except Exception:
         pass
     page.wait_for_timeout(300)
+
+
+def _recover_to_trade_page(page, context):
+    """检测页面是否离开了交易界面（登录页/空白页），如是则重新导航+登录。"""
+    try:
+        state = get_page_state(page)
+        if state == "login":
+            raise RuntimeError("on login page")
+        # 额外检查 ant-select（交易下拉）是否存在
+        if page.locator(".ant-select").count() == 0:
+            raise RuntimeError("trade UI not found")
+        return  # 页面正常，无需恢复
+    except Exception as e:
+        print(f"  [recovery] Detected bad page state ({e}), re-navigating...")
+
+    try:
+        page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=TIMEOUT["navigation"])
+        page.wait_for_timeout(2000)
+    except Exception as nav_e:
+        print(f"  [recovery] Navigation error: {nav_e}")
+        return
+
+    # 重新登录（如果需要）
+    if page.locator('input[type="password"]').count() > 0:
+        print("  [recovery] Re-logging in...")
+        try:
+            inputs = page.locator("input")
+            inputs.nth(0).fill(ACCOUNT)
+            inputs.nth(1).fill(PASSWORD)
+            page.locator("button").filter(
+                has_text=re.compile(r"log\s*in|login|sign", re.I)
+            ).first.click()
+            page.wait_for_timeout(2000)
+            context.storage_state(path=str(AUTH_FILE))
+            print("  [recovery] Re-login done")
+        except Exception as login_e:
+            print(f"  [recovery] Re-login error: {login_e}")
+    # 等待交易 UI 加载
+    try:
+        page.get_by_role("button", name=re.compile(r"up|down", re.I)).first.wait_for(
+            state="visible", timeout=8000
+        )
+    except Exception:
+        page.wait_for_timeout(2000)
 
 
 # ═══════════════════════════════════════
@@ -227,6 +289,11 @@ def select_currency(page, currency: str) -> bool:
     display = get_display(currency)
     print(f"  [currency] Selecting {display}...")
 
+    # Guard: must be on trade page (not login page) before touching ant-select
+    if page.locator('input[type="password"]').count() > 0:
+        print("  [currency] WARN: still on login page, cannot select")
+        return False
+
     variants = list(dict.fromkeys([
         display, display.upper(), display.lower(),
         display.capitalize(), display.title(),
@@ -234,7 +301,6 @@ def select_currency(page, currency: str) -> bool:
 
     def _open_dropdown() -> bool:
         """Open the currency dropdown. Returns True if dropdown appeared."""
-        # Try selector → .ant-select-selector → .ant-select (multiple fallbacks)
         for sel in [".ant-select-selector", ".ant-select"]:
             try:
                 el = page.locator(sel).first
@@ -246,17 +312,20 @@ def select_currency(page, currency: str) -> bool:
             except Exception:
                 pass
         # Last resort: JS click
-        page.evaluate("""() => {
+        _safe_eval(page, """() => {
             const el = document.querySelector('.ant-select-selector')
                     || document.querySelector('.ant-select');
             if (el) el.click();
         }""")
         page.wait_for_timeout(300)
-        return page.locator(".ant-select-dropdown").count() > 0
+        try:
+            return page.locator(".ant-select-dropdown").count() > 0
+        except Exception:
+            return False
 
     def _click_item_in_dom() -> bool:
         """Try to directly JS-click a matching item currently in the DOM."""
-        return page.evaluate("""(variants) => {
+        return bool(_safe_eval(page, """(variants) => {
             const items = document.querySelectorAll(
                 '.ant-select-item-option:not(.ant-select-item-option-disabled)');
             for (const item of items) {
@@ -271,36 +340,11 @@ def select_currency(page, currency: str) -> bool:
                 }
             }
             return false;
-        }""", variants)
+        }""", variants, default=False))
 
-    def _type_to_filter() -> bool:
-        """Use combobox search input to filter, then click first match."""
-        combo = page.locator('[role="combobox"]').first
-        if combo.count() == 0 or not combo.is_visible():
-            return False
-        try:
-            combo.fill(display)
-            page.wait_for_timeout(350)
-        except Exception:
-            return False
-        # After filtering, click first visible option
-        if _click_item_in_dom():
-            return True
-        # Also try Playwright text selector on filtered list
-        for variant in variants:
-            item = page.locator(f'.ant-select-item[title="{variant}"]')
-            if item.count() > 0:
-                try:
-                    item.first.click()
-                    return True
-                except Exception:
-                    pass
-        return False
-
-    def _scroll_and_find(scroll_steps: int = 20) -> bool:
+    def _scroll_and_find(scroll_steps: int = 25) -> bool:
         """Scroll through virtual list to find item."""
-        # Reset scroll to top first
-        page.evaluate("""() => {
+        _safe_eval(page, """() => {
             const h = document.querySelector('.rc-virtual-list-holder')
                    || document.querySelector('.ant-select-dropdown');
             if (h && h.scrollTo) h.scrollTo({top: 0, behavior: 'instant'});
@@ -309,11 +353,20 @@ def select_currency(page, currency: str) -> bool:
         for _ in range(scroll_steps):
             if _click_item_in_dom():
                 return True
-            page.evaluate("""() => {
+            # Also try Playwright title selector (catches items evaluate might miss)
+            for variant in variants:
+                try:
+                    item = page.locator(f'.ant-select-item[title="{variant}"]')
+                    if item.count() > 0:
+                        item.first.click(force=True)
+                        return True
+                except Exception:
+                    pass
+            _safe_eval(page, """() => {
                 const h = document.querySelector(
                     '.ant-select-dropdown .rc-virtual-list-holder')
                     || document.querySelector('.ant-select-dropdown');
-                if (h) h.scrollBy({top: 100, behavior: 'instant'});
+                if (h) h.scrollBy({top: 90, behavior: 'instant'});
             }""")
             page.wait_for_timeout(DELAYS["dropdown_scroll"])
         return False
@@ -323,36 +376,38 @@ def select_currency(page, currency: str) -> bool:
         page.keyboard.press("Escape")
         page.wait_for_timeout(200)
 
-        if not _open_dropdown():
-            print("  [currency] Dropdown did not open, retrying open...")
-            page.wait_for_timeout(300)
-            _open_dropdown()
+        opened = _open_dropdown()
+        if not opened:
+            print("  [currency] Dropdown did not open, retrying...")
+            page.wait_for_timeout(400)
+            opened = _open_dropdown()
+        if not opened:
+            print("  [currency] Dropdown still not open")
+            return False
 
-        # Path 1: direct JS click (fastest — no scroll needed if item already in DOM)
+        # Path 1: direct JS click (item already in DOM viewport)
         if _click_item_in_dom():
             return True
 
-        # Path 2: type to filter (combobox search)
-        if _type_to_filter():
-            return True
-
-        # Path 3: scroll through virtual list
-        if _scroll_and_find(scroll_steps=20):
+        # Path 2: scroll through virtual list
+        if _scroll_and_find(scroll_steps=25):
             return True
 
         page.keyboard.press("Escape")
         return False
 
-    # Up to 3 attempts
+    # Up to 3 attempts, 500ms gap between
     for attempt in range(3):
         if attempt > 0:
             print(f"  [currency] Retry {attempt}...")
-            page.wait_for_timeout(400)
+            page.wait_for_timeout(500)
         if _try_once():
             page.wait_for_timeout(200)
-            # Verify selection
-            selected = page.locator(".ant-select-selection-item").first
-            actual = selected.text_content().strip() if selected.count() > 0 else ""
+            try:
+                selected = page.locator(".ant-select-selection-item").first
+                actual = selected.text_content().strip() if selected.count() > 0 else ""
+            except Exception:
+                actual = ""
             if actual.upper() == display.upper():
                 print(f"  [currency] ✓ Verified: {actual}")
                 page.wait_for_timeout(DELAYS["spa_switch"])
@@ -466,44 +521,54 @@ def select_duration(page, duration: str) -> bool:
 #  Step 4: Click Direction + Verify ACTIVE
 # ═══════════════════════════════════════
 def click_direction(page, direction: str) -> bool:
-    direction = direction.lower()  # Normalize to lowercase
+    direction = direction.lower()
     d = direction.upper()
     print(f"  [direction] Clicking {d}...")
 
-    wait_for_loading_gone(page)
-
-    btn = page.get_by_role("button", name=re.compile(rf"^\s*{d}\s*$", re.I))
-    if btn.count() > 0:
-        btn.first.click()
-    else:
-        # class fallback
+    def _do_click():
+        """Try every method to click the UP/DOWN button."""
+        # Method 1: role=button with exact text
+        btn = page.get_by_role("button", name=re.compile(rf"^\s*{d}\s*$", re.I))
+        if btn.count() > 0:
+            btn.first.click(force=True)
+            return
+        # Method 2: class-based + text filter
         sel = ('[class*="up"], [class*="Up"], [class*="green"]'
                if direction == "up" else
                '[class*="down"], [class*="Down"], [class*="red"]')
-        cls_btn = page.locator(sel).filter(has_text=re.compile(d, re.I)).first
-        if cls_btn.count() > 0:
-            cls_btn.click()
-        else:
-            page.evaluate(f"""(d) => {{
-                for (const el of document.querySelectorAll(
-                    'button, [role="button"], div, span')) {{
-                    if (el.textContent.trim().toUpperCase() === d
-                        && el.offsetParent !== null) {{
-                        el.click(); return;
-                    }}
-                }}
-            }}""", d)
+        try:
+            cls_btn = page.locator(sel).filter(has_text=re.compile(d, re.I)).first
+            if cls_btn.count() > 0:
+                cls_btn.click(force=True)
+                return
+        except Exception:
+            pass
+        # Method 3: JS scan — most reliable for SPA buttons
+        _safe_eval(page, """(d) => {
+            for (const el of document.querySelectorAll(
+                    'button, [role="button"], div, span')) {
+                if (el.textContent.trim().toUpperCase() === d
+                        && el.offsetParent !== null) {
+                    el.click(); return;
+                }
+            }
+        }""", d)
 
-    page.wait_for_timeout(500)
+    # Up to 3 click attempts — site occasionally needs a moment after amount entry
+    for attempt in range(3):
+        wait_for_loading_gone(page)
+        _do_click()
+        # Wait progressively longer on each attempt
+        page.wait_for_timeout(700 + attempt * 400)
+        state = get_page_state(page)
+        if state == "active":
+            print(f"  [direction] ✓ Order placed, trade ACTIVE (attempt {attempt+1})")
+            return True
+        if attempt < 2:
+            print(f"  [direction] State '{state}' after attempt {attempt+1}, retrying...")
 
-    # ── 验证进入 ACTIVE 状态（倒计时出现）──
-    state = get_page_state(page)
-    if state == "active":
-        print(f"  [direction] ✓ Order placed, trade ACTIVE")
-        return True
-    else:
-        print(f"  [direction] FAIL: Expected ACTIVE state, got '{state}'")
-        return False
+    print(f"  [direction] FAIL: Expected ACTIVE state after 3 attempts")
+    return False
 
 
 # ═══════════════════════════════════════
@@ -637,12 +702,18 @@ def run(currency, amount, duration, direction, rounds):
                 print(f"\n=== Round {r}/{rounds}: "
                       f"{display} {amount} {d} {duration}s ===")
 
-                # ── Step 0: 确保 IDLE ──
+                # ── Step 0: 恢复页面 + 确保 IDLE ──
+                _recover_to_trade_page(page, context)
                 ensure_idle(page)
 
-                # ── Step 1: 选币种 ──
+                # ── Step 1: 选币种（失败→恢复→重试一次）──
                 if not select_currency(page, currency):
-                    raise RuntimeError(f"Currency {display} selection failed")
+                    print("  [round] Currency failed, attempting page recovery...")
+                    _recover_to_trade_page(page, context)
+                    page.wait_for_timeout(500)
+                    ensure_idle(page)
+                    if not select_currency(page, currency):
+                        raise RuntimeError(f"Currency {display} selection failed")
 
                 # ── Step 2: 设金额 ──
                 if not enter_amount(page, amount):
@@ -662,7 +733,6 @@ def run(currency, amount, duration, direction, rounds):
                 results.append(result)
 
                 if r < rounds:
-                    # 确保完全回到 IDLE 再开始下一轮
                     ensure_idle(page)
                     page.wait_for_timeout(300)
 
