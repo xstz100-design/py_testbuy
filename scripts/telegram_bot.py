@@ -552,13 +552,16 @@ class UserWorker:
 
     # ── Command execution ──
 
-    def run_command(self, command: list[str], timeout: int = 600) -> tuple:
+    def run_command(self, command: list[str], timeout: int = 600,
+                    concurrent: bool = False) -> tuple:
         print(f"[execute][{self.chat_id}] Running: {' '.join(command)}")
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
                    BP_SCREENSHOT_DIR=str(self.screenshot_dir))
-        self.stop_flag.clear()
+        # Only clear stop_flag in serial mode; concurrent workers must not touch shared flag
+        if not concurrent:
+            self.stop_flag.clear()
         try:
-            self.current_process = subprocess.Popen(
+            proc = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -568,18 +571,21 @@ class UserWorker:
                 env=env,
                 cwd=str(ROOT_DIR),
             )
+            # Only expose process for serial stop/kill; concurrent uses local ref only
+            if not concurrent:
+                self.current_process = proc
             start_time = time.time()
             stdout_chunks: list[str] = []
             stderr_chunks: list[str] = []
-            assert self.current_process.stdout is not None
-            assert self.current_process.stderr is not None
+            assert proc.stdout is not None
+            assert proc.stderr is not None
 
             def _read_stdout():
-                for line in self.current_process.stdout:  # type: ignore[union-attr]
+                for line in proc.stdout:  # type: ignore[union-attr]
                     stdout_chunks.append(line)
 
             def _read_stderr():
-                for line in self.current_process.stderr:  # type: ignore[union-attr]
+                for line in proc.stderr:  # type: ignore[union-attr]
                     stderr_chunks.append(line)
 
             t_out = threading.Thread(target=_read_stdout, daemon=True)
@@ -590,10 +596,10 @@ class UserWorker:
             while True:
                 if self.stop_flag.is_set():
                     print(f"[execute][{self.chat_id}] Stop signal received")
-                    self.current_process.terminate()
+                    proc.terminate()
                     time.sleep(0.5)
-                    if self.current_process.poll() is None:
-                        self.current_process.kill()
+                    if proc.poll() is None:
+                        proc.kill()
                     t_out.join(timeout=2)
                     t_err.join(timeout=2)
                     fake = subprocess.CompletedProcess(
@@ -603,10 +609,10 @@ class UserWorker:
 
                 if time.time() - start_time > timeout:
                     print(f"[execute][{self.chat_id}] TIMEOUT after {timeout}s")
-                    self.current_process.terminate()
+                    proc.terminate()
                     time.sleep(0.5)
-                    if self.current_process.poll() is None:
-                        self.current_process.kill()
+                    if proc.poll() is None:
+                        proc.kill()
                     t_out.join(timeout=2)
                     t_err.join(timeout=2)
                     fake = subprocess.CompletedProcess(
@@ -615,7 +621,7 @@ class UserWorker:
                     )
                     return fake, {"status": "error", "message": f"Timeout after {timeout}s"}
 
-                retcode = self.current_process.poll()
+                retcode = proc.poll()
                 if retcode is not None:
                     t_out.join(timeout=5)
                     t_err.join(timeout=5)
@@ -655,7 +661,8 @@ class UserWorker:
             )
             return fake, {"status": "error", "message": str(e)}
         finally:
-            self.current_process = None
+            if not concurrent:
+                self.current_process = None
 
     def execute_single_order(self, order_text: str,
                               concurrent: bool = False) -> tuple[str, dict]:
@@ -680,7 +687,7 @@ class UserWorker:
             # Concurrent batch: each order is a separate browser process,
             # no shared state → no need to serialize via account lock
             print(f"[concurrent][{self.chat_id}] Launching: {order_text}")
-            _, result = self.run_command(command, timeout=300)
+            _, result = self.run_command(command, timeout=300, concurrent=True)
         else:
             # Single order: serialize on account to avoid race conditions
             lock = _get_account_lock(account)
