@@ -23,6 +23,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+sys.path.insert(0, str(Path(__file__).parent))
+try:
+    from config import normalize_currency as _normalize_currency
+except ImportError:
+    def _normalize_currency(c: str) -> str:  # type: ignore[misc]
+        return c.strip().upper()
+
 
 @dataclass
 class Order:
@@ -97,6 +104,7 @@ def parse_order_line(line: str) -> Optional[Order]:
         raise ValueError(f"Invalid order line: {line}")
 
     currency = " ".join(parts[:direction_index - 1])
+    currency = _normalize_currency(currency)
     amount = parts[direction_index - 1]
     direction = parts[direction_index].lower()
     duration_token = parts[direction_index + 1]

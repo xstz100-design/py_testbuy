@@ -503,7 +503,7 @@ def wait_for_result(page, duration: str) -> dict:
     return result
 
 
-def _safe_playwright():
+def _safe_playwright():  # type: ignore[return]
     """Launch sync_playwright with retry on WinError 10055 socket exhaustion."""
     for attempt in range(3):
         try:
@@ -523,6 +523,7 @@ def _safe_playwright():
                 time.sleep(3)
             else:
                 raise
+    raise RuntimeError("_safe_playwright: all retries failed")
 
 
 # ═══════════════════════════════════════

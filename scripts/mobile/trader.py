@@ -725,7 +725,7 @@ def _install_settlement_observer(page):
 def _read_balance(page) -> float:
     """Read the current account balance shown in the page header."""
     try:
-        raw = page.evaluate("""() => {
+        raw = page.evaluate(r"""() => {
             // Strategy 1: known class selectors
             const SELS = [
                 '.user-balance', '.account-balance', '.wallet-balance',
@@ -878,7 +878,7 @@ def wait_for_result(page, duration: str, r: int, trade_start: float) -> dict:
     return result
 
 
-def _safe_playwright():
+def _safe_playwright():  # type: ignore[return]
     """Launch sync_playwright with retry on WinError 10055 socket exhaustion."""
     for attempt in range(3):
         try:
@@ -897,6 +897,7 @@ def _safe_playwright():
                 time.sleep(3)
             else:
                 raise
+    raise RuntimeError("_safe_playwright: all retries failed")
 
 
 def run(currency, amount, duration, direction, rounds):

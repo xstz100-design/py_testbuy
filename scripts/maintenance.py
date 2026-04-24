@@ -158,11 +158,13 @@ def get_system_status() -> dict:
         # Python processes
         python_procs = []
         for proc in psutil.process_iter(['pid', 'name', 'memory_info', 'cmdline']):
-            if 'python' in proc.info['name'].lower():
-                mem_mb = proc.info['memory_info'].rss / 1024 / 1024
-                cmdline = ' '.join(proc.info.get('cmdline') or [])[:80]
+            info: dict = proc.info  # type: ignore[attr-defined]
+            if 'python' in (info.get('name') or '').lower():
+                mem_info = info.get('memory_info')
+                mem_mb = (mem_info.rss if mem_info else 0) / 1024 / 1024
+                cmdline = ' '.join(info.get('cmdline') or [])[:80]
                 python_procs.append({
-                    "pid": proc.info['pid'],
+                    "pid": info.get('pid'),
                     "memory_mb": round(mem_mb, 1),
                     "cmd": cmdline,
                 })

@@ -223,7 +223,7 @@ def handle_account_command(chat_id: str, text: str) -> Optional[str]:
     return None
 
 
-def handle_withdraw_command(chat_id: str, text: str) -> Optional[str]:
+def handle_withdraw_command(chat_id: str, text: str) -> tuple:
     """Handle withdrawal setting commands. Returns response message or None."""
     text_stripped = text.strip()
     text_lower = text_stripped.lower()
@@ -569,13 +569,15 @@ class UserWorker:
             start_time = time.time()
             stdout_chunks: list[str] = []
             stderr_chunks: list[str] = []
+            assert self.current_process.stdout is not None
+            assert self.current_process.stderr is not None
 
             def _read_stdout():
-                for line in self.current_process.stdout:
+                for line in self.current_process.stdout:  # type: ignore[union-attr]
                     stdout_chunks.append(line)
 
             def _read_stderr():
-                for line in self.current_process.stderr:
+                for line in self.current_process.stderr:  # type: ignore[union-attr]
                     stderr_chunks.append(line)
 
             t_out = threading.Thread(target=_read_stdout, daemon=True)
@@ -655,6 +657,8 @@ class UserWorker:
 
     def execute_single_order(self, order_text: str) -> tuple[str, dict]:
         order = parse_order_line(order_text)
+        if order is None:
+            raise ValueError(f"Invalid order: {order_text}")
         command = [
             sys.executable, str(TRADE_SCRIPT),
             "--mode", order.mode,
@@ -863,7 +867,7 @@ def get_health_status() -> str:
         )
         py_count = sum(
             1 for p in psutil.process_iter(["name"])
-            if "python" in p.info["name"].lower()
+            if "python" in (p.info.get("name") or "").lower()  # type: ignore[attr-defined]
         )
         lines.append(f"Python processes: {py_count}")
     else:
@@ -1044,7 +1048,7 @@ def telegram_api(method: str, data: Optional[dict] = None, files: Optional[dict]
 
 
 def send_message(chat_id: str, text: str, reply_to_message_id: Optional[int] = None):
-    payload = {
+    payload: dict = {
         "chat_id": chat_id,
         "text": text,
     }
@@ -1107,6 +1111,8 @@ def parse_message_text(text: str, chat_id: Optional[str] = None) -> tuple[str, l
 def format_single_result(result: dict, original_text: str) -> str:
     status = result.get("status")
     parsed = parse_order_line(original_text)
+    if parsed is None:
+        return f"Trade result: {status}\n{result.get('message', '')}"
     if status == "ok":
         return (
             f"Trade completed ({parsed.mode})\n"
@@ -1173,6 +1179,7 @@ def extract_text_from_update(update: dict) -> Optional[TradeTask]:
         return None
     elif wd_type == "withdraw":
         msg, shot_path = wd_response
+        shot_path = Path(shot_path) if shot_path and not isinstance(shot_path, Path) else shot_path
         if shot_path and shot_path.exists():
             send_photo(chat_id, shot_path, msg)
             try:
