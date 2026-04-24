@@ -94,24 +94,60 @@ if [ -d "$PROJECT_DIR/.git" ]; then
     fi
 fi
 
-# ── 1. Check Python 3.10+ ──
-info "[STEP 1] Checking Python..."
-if command -v python3 &>/dev/null; then
-    PY="python3"
-elif command -v python &>/dev/null; then
+# ── 1. Ensure Python 3.12 (same as Windows) ──
+info "[STEP 1] Checking Python 3.12..."
+
+TARGET_PY_VERSION="3.12"
+
+_use_pyenv_python() {
+    # Install pyenv if missing
+    if ! command -v pyenv &>/dev/null; then
+        info "  pyenv not found, installing via Homebrew..."
+        if ! command -v brew &>/dev/null; then
+            error "Homebrew not found. Install from https://brew.sh then re-run."
+        fi
+        brew install pyenv -q
+        # Add pyenv to current shell
+        export PYENV_ROOT="$HOME/.pyenv"
+        export PATH="$PYENV_ROOT/bin:$PATH"
+        eval "$(pyenv init -)"
+    else
+        export PYENV_ROOT="${PYENV_ROOT:-$HOME/.pyenv}"
+        export PATH="$PYENV_ROOT/bin:$PATH"
+        eval "$(pyenv init -)"
+    fi
+
+    # Install Python 3.12 if not already available
+    PYENV_PY=$(pyenv versions --bare | grep "^3\.12" | tail -1)
+    if [ -z "$PYENV_PY" ]; then
+        info "  Installing Python 3.12 via pyenv (this may take a few minutes)..."
+        pyenv install 3.12
+        PYENV_PY=$(pyenv versions --bare | grep "^3\.12" | tail -1)
+    fi
+
+    pyenv local "$PYENV_PY"
     PY="python"
+    info "  Using pyenv Python $(python --version 2>&1)"
+}
+
+# Check if current python3 is already 3.12
+if command -v python3 &>/dev/null; then
+    _CUR_MINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo "0")
+    _CUR_MAJOR=$(python3 -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo "0")
+    if [ "$_CUR_MAJOR" -eq 3 ] && [ "$_CUR_MINOR" -ge 12 ]; then
+        PY="python3"
+        info "  Python $(python3 --version) — OK"
+    else
+        info "  Found Python $_CUR_MAJOR.$_CUR_MINOR, need 3.12 — installing via pyenv..."
+        _use_pyenv_python
+    fi
 else
-    error "Python3 not found. Install: brew install python3"
+    info "  python3 not found — installing via pyenv..."
+    _use_pyenv_python
 fi
 
-PY_VERSION=$($PY -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-PY_MAJOR=$($PY -c "import sys; print(sys.version_info.major)")
-PY_MINOR=$($PY -c "import sys; print(sys.version_info.minor)")
-
-if [ "$PY_MAJOR" -lt 3 ] || ([ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 9 ]); then
-    error "Python 3.9+ required (found $PY_VERSION). Upgrade: brew install python3"
-fi
-info "Python $PY_VERSION OK"
+PY_VERSION=$($PY -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")
+info "Python $PY_VERSION ready"
 
 # ── 2. Create virtual environment ──
 info "[STEP 2] Virtual environment..."
