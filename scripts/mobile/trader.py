@@ -377,202 +377,192 @@ def select_currency(page, currency: str) -> bool:
     category = get_category(currency)
     print(f"  [currency] Selecting {display} ({category})...")
 
-    close_market_popup(page)
+    tab_map: dict[str, list[str]] = {
+        "forex":     ["Forex", "FX", "外汇"],
+        "commodity": ["Commodities", "Commodity", "商品"],
+        "index":     ["Indices", "Index", "指数"],
+    }
+    tab_texts = tab_map.get(category, []) if category != "crypto" else []
 
-    # 每次都强制刷新 trade 页面（确保滚动位置重置到顶部）
-    page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=45000)
-    page.wait_for_timeout(DELAYS["popup_check"])
-    page.reload(wait_until="domcontentloaded", timeout=45000)
-    page.wait_for_timeout(DELAYS["page_load"])
+    def _goto_market_list():
+        """Navigate to trade URL and wait for currency list to be ready."""
+        page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(DELAYS["page_load"])
+        close_market_popup(page)
+        # Wait for ANY list element to appear
+        try:
+            page.locator("li, .list-title, .down-btn, .up-btn, span").first \
+                .wait_for(state="visible", timeout=12000)
+        except Exception:
+            page.wait_for_timeout(3000)
+        page.evaluate("() => { (document.scrollingElement || document.body).scrollTo(0, 0); }")
+        page.wait_for_timeout(400)
+        close_market_popup(page)
 
-    # 等待交易列表或关键元素出现（避免 splash 页未消失就操作）
-    try:
-        page.locator(".list-title, .down-btn, .up-btn, .van-overlay, span").first.wait_for(
-            state="visible", timeout=15000
-        )
-    except Exception:
-        page.wait_for_timeout(5000)
-
-    # 滚动到页面顶部，确保从 Cryptocurrency Trade 开始
-    page.evaluate("() => { (document.scrollingElement || document.body).scrollTo(0, 0); }")
-    page.wait_for_timeout(DELAYS["input_verify"])
-    close_market_popup(page)
-
-    # ── 切换分类 tab ──
-    # category 来自 config: "crypto" / "commodity" / "forex" / "index"
-    if category != "crypto":
-        tab_map: dict[str, list[str]] = {
-            "forex":     ["Forex", "FX", "外汇"],
-            "commodity": ["Commodities", "Commodity", "商品"],
-            "index":     ["Indices", "Index", "指数"],
-        }
-        tab_texts = tab_map.get(category, [category.capitalize()])
-        # JS: 遍历所有可见的短文字元素，精确匹配再宽松匹配
-        clicked_tab = page.evaluate("""(texts) => {
-            const candidates = Array.from(document.querySelectorAll(
-                'div, span, button, a, li'));
-            // 先精确匹配
+    def _click_tab():
+        """Switch to the correct category tab (forex/commodity/index)."""
+        if not tab_texts:
+            return
+        clicked = page.evaluate("""(texts) => {
+            const els = Array.from(document.querySelectorAll('div,span,button,a,li'));
+            // exact match first
             for (const text of texts) {
-                for (const el of candidates) {
+                for (const el of els) {
                     const c = el.textContent.trim();
                     if (c !== text) continue;
                     const r = el.getBoundingClientRect();
-                    if (r.width > 20 && r.width < 250 && r.height > 15 && r.height < 100) {
+                    if (r.width > 20 && r.width < 300 && r.height > 15 && r.height < 80) {
                         el.click(); return text;
                     }
                 }
             }
-            // 再宽松匹配（包含即可）
+            // partial match fallback
             for (const text of texts) {
-                for (const el of candidates) {
+                for (const el of els) {
                     const c = el.textContent.trim();
                     if (!c.includes(text)) continue;
                     const r = el.getBoundingClientRect();
-                    if (r.width > 20 && r.width < 250 && r.height > 15 && r.height < 100) {
+                    if (r.width > 20 && r.width < 300 && r.height > 15 && r.height < 80) {
                         el.click(); return text + '(partial)';
                     }
                 }
             }
             return null;
         }""", tab_texts)
-        if clicked_tab:
-            print(f"  [currency] Switched to tab: {clicked_tab}")
+        if clicked:
+            print(f"  [currency] Tab: {clicked}")
         else:
-            print(f"  [currency] WARN: tab not found for category={category}, proceeding anyway")
-        page.wait_for_timeout(800)
+            print(f"  [currency] WARN: tab not found for {category}, proceeding anyway")
+        page.wait_for_timeout(900)
 
-    def _find_and_tap_currency() -> bool:
-        """Find and tap the matching currency row using targeted selectors.
-        Strategy:
-          1. Playwright get_by_text(exact) on known currency item selectors
-          2. JS scan of .list-title / span elements (faster than .all() iteration)
-          3. Scroll down and retry up to 8 passes
+    def _find_and_tap() -> bool:
+        """
+        Find the currency row and tap it.
+        Strategy 1: Playwright get_by_text (exact) — works regardless of CSS class.
+        Strategy 2: JS broad scan of ALL li/div/span for exact text match.
+        Strategy 3: JS with partial/case-insensitive match as last resort.
+        Repeat with scroll-down up to 12 passes.
         """
         search_texts = list(dict.fromkeys([
             display, display.upper(), display.lower(),
             display.capitalize(), currency.upper(), currency.lower(),
         ]))
 
-        # Scroll to top first
+        # Reset scroll to top
         page.evaluate("""() => {
             (document.scrollingElement || document.body).scrollTo(0, 0);
-            document.querySelectorAll('*').forEach(el => {
-                if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 100)
-                    el.scrollTo(0, 0);
-            });
         }""")
         page.wait_for_timeout(300)
 
-        for attempt in range(10):
+        for attempt in range(12):
             if attempt == 0:
                 close_market_popup(page)
 
-            # Strategy 1: Playwright native — exact text match on visible currency rows
+            # ── Strategy 1: Playwright get_by_text ──
+            # Does not depend on CSS class names at all
             for txt in search_texts:
                 try:
-                    # Target known currency list class names first
-                    for sel in [".list-title", ".coin-name", ".currency-name",
-                                 ".name", ".title", ".label"]:
-                        loc = page.locator(sel).filter(has_text=re.compile(
-                            rf"^{re.escape(txt)}$", re.I
-                        )).first
-                        if loc.count() > 0:
-                            box = loc.bounding_box()
-                            if box and box["y"] >= 0 and box["height"] > 10:
-                                loc.tap()
-                                print(f"  [currency] Tapped via selector {sel}: {txt}")
-                                return True
+                    loc = page.get_by_text(txt, exact=True).first
+                    if loc.count() > 0:
+                        box = loc.bounding_box()
+                        if box and 0 <= box["y"] <= 1800 and box["height"] > 8:
+                            loc.tap()
+                            print(f"  [currency] Tapped via get_by_text: {txt}")
+                            return True
                 except Exception:
                     pass
 
-            # Strategy 2: JS scan — only short text nodes (currency names are short)
-            found = page.evaluate("""(texts) => {
-                // Only look at elements with short text that match exactly
-                const candidates = document.querySelectorAll(
-                    '.list-title, .coin-name, .currency-name, .name, ' +
-                    'span[class], div[class*="name"], div[class*="title"], ' +
-                    'div[class*="coin"], div[class*="item"] span'
-                );
-                for (const el of candidates) {
-                    const t = (el.innerText || el.textContent || '').trim();
-                    if (!texts.includes(t.toUpperCase()) && !texts.includes(t)) continue;
+            # ── Strategy 2: JS broad exact scan (ALL li/div/span) ──
+            # Uses direct text node content — immune to class name changes
+            found = page.evaluate("""(upperTexts, rawTexts) => {
+                const all = document.querySelectorAll('li, div, span, td');
+                for (const el of all) {
+                    // Only look at direct text content (not aggregated child text)
+                    const own = Array.from(el.childNodes)
+                        .filter(n => n.nodeType === 3)
+                        .map(n => n.textContent.trim())
+                        .join('').trim();
+                    if (!own) continue;
+                    const upper = own.toUpperCase();
+                    if (!upperTexts.includes(upper) && !rawTexts.includes(own)) continue;
                     const r = el.getBoundingClientRect();
-                    if (r.width < 5 || r.height < 5 || r.y < 0) continue;
-                    // Tap the parent row if it's larger
+                    if (r.width < 5 || r.height < 5) continue;
+                    if (r.y < 0 || r.y > window.innerHeight + 200) continue;
+                    // Prefer tapping the parent row (larger click area)
                     let target = el;
-                    const parent = el.parentElement;
-                    if (parent) {
-                        const pr = parent.getBoundingClientRect();
-                        if (pr.height > r.height && pr.width > 80) target = parent;
+                    const p = el.parentElement;
+                    if (p) {
+                        const pr = p.getBoundingClientRect();
+                        if (pr.height > r.height && pr.width > 80) target = p;
                     }
                     target.click();
-                    return t;
+                    return own;
                 }
                 return null;
-            }""", [t.upper() for t in search_texts] + search_texts)
+            }""", [t.upper() for t in search_texts], search_texts)
             if found:
-                print(f"  [currency] Tapped via JS scan: {found}")
+                print(f"  [currency] Tapped via JS broad scan: {found}")
                 return True
 
-            # Scroll down to reveal more items (virtual list)
-            page.evaluate("""() => {
-                const body = document.scrollingElement || document.body;
-                body.scrollBy({top: 280, behavior: 'smooth'});
-                // Also scroll any overflow container
-                document.querySelectorAll('*').forEach(el => {
-                    if (el.scrollHeight > el.clientHeight + 80 && el.clientHeight > 150)
-                        el.scrollBy({top: 280, behavior: 'smooth'});
-                });
-            }""")
-            page.wait_for_timeout(600)
-
-        return False
-
-    # 找到并点击币种行
-    navigated = _find_and_tap_currency()
-
-    # 首次失败 → 回到列表页重试一次（有时页面还在加载中）
-    if not navigated:
-        print(f"  [currency] First pass failed, reloading list and retrying...")
-        page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=45000)
-        page.wait_for_timeout(DELAYS["page_load"])
-        close_market_popup(page)
-        # 重新切 tab
-        if category != "crypto":
-            tab_texts = tab_map.get(category, [category.capitalize()])  # type: ignore[possibly-undefined]
-            page.evaluate("""(texts) => {
-                for (const text of texts) {
-                    for (const el of document.querySelectorAll('div,span,button,a,li')) {
-                        const c = el.textContent.trim();
-                        if (c === text || c.includes(text)) {
-                            const r = el.getBoundingClientRect();
-                            if (r.width > 20 && r.width < 250 && r.height > 15)
-                                { el.click(); return; }
-                        }
+            # ── Strategy 3: JS case-insensitive partial match (last resort) ──
+            if attempt >= 6:
+                found2 = page.evaluate("""(upper) => {
+                    const all = document.querySelectorAll('li, div, span');
+                    for (const el of all) {
+                        const t = (el.innerText || el.textContent || '').trim().toUpperCase();
+                        if (!t.includes(upper)) continue;
+                        if (t.length > upper.length * 3) continue; // skip large containers
+                        const r = el.getBoundingClientRect();
+                        if (r.width < 5 || r.height < 5) continue;
+                        if (r.y < 0 || r.y > window.innerHeight + 200) continue;
+                        el.click();
+                        return t;
                     }
-                }
-            }""", tab_texts)
-            page.wait_for_timeout(900)
-        navigated = _find_and_tap_currency()
+                    return null;
+                }""", display.upper())
+                if found2:
+                    print(f"  [currency] Tapped via partial JS scan: {found2}")
+                    return True
 
-    if not navigated:
-        print(f"  [currency] FAIL: {display} not found in market list")
+            # Scroll down to reveal more items
+            page.evaluate("""() => {
+                (document.scrollingElement || document.body)
+                    .scrollBy({top: 300, behavior: 'instant'});
+            }""")
+            page.wait_for_timeout(500)
+
         return False
 
-    # ── 验证跳转到 chart 页面 ──
-    try:
-        page.wait_for_url(re.compile(r"#/chart"), timeout=10000)
-    except Exception:
-        print(f"  [currency] FAIL: Did not navigate to chart page")
+    # ── Main flow ──
+    _goto_market_list()
+    _click_tab()
+
+    tapped = _find_and_tap()
+    if not tapped:
+        print(f"  [currency] First pass failed, reloading and retrying...")
+        _goto_market_list()
+        _click_tab()
+        tapped = _find_and_tap()
+
+    if not tapped:
+        shot(page, f"currency-fail-{currency}-{int(time.time())}")
+        print(f"  [currency] FAIL: {display} not found in list")
         return False
 
-    # ── 验证交易面板加载完成 ──
+    # ── 验证：等待交易面板出现（不依赖 URL 格式）──
     try:
         page.locator(".amount-btn, .amount-box, .down-btn, .up-btn").first \
             .wait_for(state="visible", timeout=15000)
     except Exception:
-        print(f"  [currency] FAIL: Trade panel not loaded")
-        return False
+        # 多等 3 秒再试一次
+        page.wait_for_timeout(3000)
+        try:
+            page.locator(".amount-btn, .amount-box, .down-btn, .up-btn").first \
+                .wait_for(state="visible", timeout=8000)
+        except Exception:
+            shot(page, f"currency-panel-fail-{currency}-{int(time.time())}")
+            print(f"  [currency] FAIL: Trade panel not loaded after tapping {display}")
+            return False
 
     page.wait_for_timeout(400)
     print(f"  [currency] ✓ Trade panel loaded for {display}")
