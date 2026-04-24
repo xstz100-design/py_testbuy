@@ -697,18 +697,8 @@ class UserWorker:
                 except Exception:
                     pass
         else:
-            if result.get("status") == "ok":
-                shot = self.latest_screenshot()
-                if shot is not None:
-                    if send_photo(chat_id, shot, message):
-                        try:
-                            shot.unlink()
-                        except Exception:
-                            pass
-                else:
-                    send_message(chat_id, message + "\n(No screenshot)")
-            else:
-                send_message(chat_id, message)
+            # No screenshot found after start_time — send text only, never use stale shots
+            send_message(chat_id, message + "\n(No screenshot)")
         self.cleanup_old_screenshots()
 
     # ── Task handler ──

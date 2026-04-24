@@ -466,14 +466,21 @@ def click_direction(page, direction: str) -> bool:
 # ═══════════════════════════════════════
 #  Step 5: Wait for Result + Close
 # ═══════════════════════════════════════
-def wait_for_result(page, duration: str) -> dict:
-    wait_s = int(duration) + 8
-    print(f"  [wait] Waiting up to {wait_s}s for settlement...")
+def wait_for_result(page, duration: str, trade_start: float) -> dict:
+    dur_sec = int(duration)
+    # Must wait at least duration+5s from the moment the order was placed
+    # before polling for result, to avoid capturing leftover/stale popups.
+    wait_until = trade_start + dur_sec + 5.0
+    max_wait_until = trade_start + dur_sec + 15.0  # absolute ceiling
 
+    print(f"  [wait] Trade duration {dur_sec}s — waiting for expiry (≥{dur_sec+5}s)...")
+    while time.time() < wait_until:
+        time.sleep(0.5)
+
+    print(f"  [wait] Expiry passed, polling for result popup...")
     result = {"won": False, "profit": "", "details": ""}
-    start = time.time()
 
-    while time.time() - start < wait_s:
+    while time.time() < max_wait_until:
         state = get_page_state(page)
         if state == "result":
             page.wait_for_timeout(500)
@@ -605,9 +612,10 @@ def run(currency, amount, duration, direction, rounds):
                 # ── Step 4: 下单 ──
                 if not click_direction(page, direction):
                     raise RuntimeError("Order placement failed")
+                trade_start = time.time()
 
                 # ── Step 5: 等待结算 ──
-                result = wait_for_result(page, duration)
+                result = wait_for_result(page, duration, trade_start)
                 results.append(result)
 
                 if r < rounds:
