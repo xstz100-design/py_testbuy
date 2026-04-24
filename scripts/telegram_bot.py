@@ -50,6 +50,7 @@ DATA_DIR = _INSTANCE_DIR if _INSTANCE_DIR else ROOT_DIR
 TRADE_SCRIPT = ROOT_DIR / "trade.py"
 BATCH_SCRIPT = ROOT_DIR / "batch_trade.py"
 SCREENSHOT_DIR = DATA_DIR / "screenshots"
+_BOT_PID_FILE = DATA_DIR / ".bot.pid"  # module-level — accessible from poll_updates()
 
 # Load bot token from env or config
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() or getattr(config, "TELEGRAM_BOT_TOKEN", "")
@@ -1200,7 +1201,16 @@ def extract_text_from_update(update: dict) -> Optional[TradeTask]:
 
 
 def poll_updates():
-    """Poll for updates, route tasks to per-user workers."""
+    """Poll for updates, route tasks to per-user workers.
+
+    Telegram only allows ONE active getUpdates connection per token.
+    If another instance starts (on any device), this instance will receive
+    consecutive HTTP 409 Conflict errors.  After _MAX_CONSECUTIVE_409 such
+    errors we exit gracefully so the new instance takes over automatically.
+    """
+    _MAX_CONSECUTIVE_409 = 4   # ~20 s of 409s → yield to the new instance
+    _consecutive_409 = 0
+
     offset = 0
     while True:
         try:
@@ -1212,6 +1222,8 @@ def poll_updates():
                     "allowed_updates": json.dumps(["message", "edited_message"]),
                 },
             )
+            # Successful poll → reset 409 counter
+            _consecutive_409 = 0
             for update in updates:
                 offset = max(offset, update["update_id"] + 1)
                 task = extract_text_from_update(update)
@@ -1237,9 +1249,26 @@ def poll_updates():
                     task.message_id,
                 )
         except error.URLError as exc:
-            print(f"[telegram] Network error: {exc}")
-            time.sleep(5)
+            err_str = str(exc)
+            if "409" in err_str or "Conflict" in err_str:
+                _consecutive_409 += 1
+                print(f"[telegram] 409 Conflict ({_consecutive_409}/{_MAX_CONSECUTIVE_409})"
+                      " — another instance is active")
+                if _consecutive_409 >= _MAX_CONSECUTIVE_409:
+                    print("[bot] New instance detected on another device. "
+                          "Yielding — this instance will exit now.")
+                    try:
+                        _BOT_PID_FILE.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise SystemExit(0)
+                time.sleep(5)
+            else:
+                _consecutive_409 = 0
+                print(f"[telegram] Network error: {exc}")
+                time.sleep(5)
         except Exception as exc:
+            _consecutive_409 = 0
             print(f"[telegram] Polling error: {exc}")
             time.sleep(5)
 
@@ -1251,7 +1280,7 @@ def main():
         raise SystemExit("TELEGRAM_BOT_TOKEN is required")
 
     # ── Single-instance lock ──
-    _PID_FILE = DATA_DIR / ".bot.pid"
+    # _PID_FILE is defined at module level (below DATA_DIR)
     _lock_fh = None
 
     def _kill_old_instance(old_pid: int) -> None:
@@ -1270,7 +1299,8 @@ def main():
                 return  # process gone
         # Still alive — force kill
         try:
-            os.kill(old_pid, _signal.SIGKILL)
+            _sigkill = getattr(_signal, "SIGKILL", _signal.SIGTERM)  # SIGKILL is Unix-only
+            os.kill(old_pid, _sigkill)
             print(f"[bot] Force-killed old instance (PID {old_pid})")
         except OSError:
             pass
@@ -1280,9 +1310,9 @@ def main():
         import platform
         if platform.system() == "Windows":
             # Windows: use a simple PID file (no fcntl)
-            if _PID_FILE.exists():
+            if _BOT_PID_FILE.exists():
                 try:
-                    old_pid = int(_PID_FILE.read_text().strip())
+                    old_pid = int(_BOT_PID_FILE.read_text().strip())
                     try:
                         import psutil
                         if psutil.pid_exists(old_pid):
@@ -1294,12 +1324,12 @@ def main():
                         pass
                 except ValueError:
                     pass
-            _PID_FILE.write_text(str(os.getpid()))
+            _BOT_PID_FILE.write_text(str(os.getpid()))
         else:
             # Unix: check PID file, kill old instance, then take the lock
-            if _PID_FILE.exists():
+            if _BOT_PID_FILE.exists():
                 try:
-                    old_pid = int(_PID_FILE.read_text().strip())
+                    old_pid = int(_BOT_PID_FILE.read_text().strip())
                     try:
                         os.kill(old_pid, 0)  # check if alive
                         print(f"[bot] Stopping previous instance (PID {old_pid})...")
@@ -1308,17 +1338,17 @@ def main():
                         pass  # already gone
                 except ValueError:
                     pass
-                _PID_FILE.unlink(missing_ok=True)
+                _BOT_PID_FILE.unlink(missing_ok=True)
 
             import fcntl as _fcntl
-            _lock_fh = open(_PID_FILE, "w")
-            _fcntl.flock(_lock_fh, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            _lock_fh = open(_BOT_PID_FILE, "w")
+            _fcntl.flock(_lock_fh, _fcntl.LOCK_EX | _fcntl.LOCK_NB)  # type: ignore[attr-defined]
             _lock_fh.write(str(os.getpid()))
             _lock_fh.flush()
 
     def _release_lock() -> None:
         try:
-            _PID_FILE.unlink(missing_ok=True)
+            _BOT_PID_FILE.unlink(missing_ok=True)
         except Exception:
             pass
         if _lock_fh:
