@@ -18,7 +18,7 @@ NC='\033[0m'
 
 info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error() { echo "[ERROR] $1" >&2; exit 1; }
+error() { echo "[ERROR] $1"; exit 1; }
 
 echo ""
 echo "============================================"
@@ -124,14 +124,14 @@ else
 fi
 
 VENV_PY="$VENV_DIR/bin/python3"
-VENV_PIP="$VENV_DIR/bin/pip"
 
-# Verify venv binaries exist
+# Verify venv python exists
 if [ ! -x "$VENV_PY" ]; then
-    error "venv python3 not found: $VENV_PY (try deleting .venv and re-running)"
+    # fallback: python (without 3)
+    VENV_PY="$VENV_DIR/bin/python"
 fi
-if [ ! -x "$VENV_PIP" ]; then
-    error "venv pip not found: $VENV_PIP (try deleting .venv and re-running)"
+if [ ! -x "$VENV_PY" ]; then
+    error "venv python not found in $VENV_DIR/bin/ — delete .venv and re-run"
 fi
 
 # ── 3. Upgrade pip ──
@@ -143,7 +143,7 @@ info "[STEP 4] Installing dependencies..."
 if [ ! -f "$PROJECT_DIR/requirements.txt" ]; then
     error "requirements.txt not found at $PROJECT_DIR/requirements.txt"
 fi
-$VENV_PIP install -r "$PROJECT_DIR/requirements.txt" -q
+$VENV_PY -m pip install -r "$PROJECT_DIR/requirements.txt" -q
 info "  Dependencies installed"
 
 # ── 5. Install Playwright browsers ──
