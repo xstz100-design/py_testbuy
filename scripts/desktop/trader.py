@@ -236,6 +236,12 @@ def select_currency(page, currency: str) -> bool:
     def _open_and_search(scroll_attempts: int = 15) -> tuple[bool, str]:
         """Open dropdown, scroll through items looking for a match.
         Returns (found, matched_display)."""
+        try:
+            page.locator(".ant-select").first.wait_for(
+                state="visible", timeout=TIMEOUT["element"]
+            )
+        except Exception:
+            return False, display
         page.locator(".ant-select").first.click()
         page.wait_for_timeout(300)
         dropdown = page.locator(".ant-select-dropdown")
