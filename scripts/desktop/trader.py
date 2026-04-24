@@ -233,51 +233,69 @@ def select_currency(page, currency: str) -> bool:
     page.keyboard.press("Escape")
     page.wait_for_timeout(300)
 
-    page.locator(".ant-select").first.click()
-    page.wait_for_timeout(300)
-    dropdown = page.locator(".ant-select-dropdown")
+    def _open_and_search(scroll_attempts: int = 15) -> tuple[bool, str]:
+        """Open dropdown, scroll through items looking for a match.
+        Returns (found, matched_display)."""
+        page.locator(".ant-select").first.click()
+        page.wait_for_timeout(300)
+        dropdown = page.locator(".ant-select-dropdown")
 
-    # 智能匹配：先精确匹配，再大小写不敏感匹配
-    for attempt in range(15):
-        # 方法1: 精确匹配 title 属性
-        item = page.locator(f'.ant-select-item[title="{display}"]')
-        if item.count() > 0 and item.is_visible():
-            item.click()
-            break
-        
-        # 方法2: 大小写不敏感匹配 - 尝试常见变体
+        # 先滚回顶部，确保从头开始找
+        page.evaluate("""() => {
+            const h = document.querySelector('.rc-virtual-list-holder')
+                   || document.querySelector('.ant-select-dropdown');
+            if (h && h.scrollTo) h.scrollTo({top: 0, behavior: 'instant'});
+        }""")
+        page.wait_for_timeout(150)
+
         variants = list(dict.fromkeys([
             display, display.upper(), display.lower(),
             display.capitalize(), display.title(),
         ]))
-        matched = False
-        for variant in variants:
-            item = page.locator(f'.ant-select-item[title="{variant}"]')
+
+        for attempt in range(scroll_attempts):
+            # 方法1: 精确匹配 title 属性
+            item = page.locator(f'.ant-select-item[title="{display}"]')
             if item.count() > 0 and item.is_visible():
                 item.click()
-                display = variant  # 更新为实际匹配到的名称
-                matched = True
-                break
-            # 也尝试文本内容匹配
-            text_item = dropdown.locator(f'.ant-select-item-option-content:text-is("{variant}")')
-            if text_item.count() > 0 and text_item.is_visible():
-                text_item.click()
-                display = variant
-                matched = True
-                break
-        if matched:
-            break
-            
-        if attempt < 14:
-            page.evaluate("""() => {
-                const dd = document.querySelector(
-                    '.ant-select-dropdown .rc-virtual-list-holder')
-                    || document.querySelector('.ant-select-dropdown');
-                if (dd) dd.scrollBy({top: 120, behavior: 'auto'});
-            }""")
-            page.wait_for_timeout(DELAYS["dropdown_scroll"])
-    else:
+                return True, display
+
+            # 方法2: 大小写变体匹配 (title 或 text-is)
+            for variant in variants:
+                item = page.locator(f'.ant-select-item[title="{variant}"]')
+                if item.count() > 0 and item.is_visible():
+                    item.click()
+                    return True, variant
+                text_item = dropdown.locator(
+                    f'.ant-select-item-option-content:text-is("{variant}")')
+                if text_item.count() > 0 and text_item.is_visible():
+                    text_item.click()
+                    return True, variant
+
+            if attempt < scroll_attempts - 1:
+                page.evaluate("""() => {
+                    const dd = document.querySelector(
+                        '.ant-select-dropdown .rc-virtual-list-holder')
+                        || document.querySelector('.ant-select-dropdown');
+                    if (dd) dd.scrollBy({top: 120, behavior: 'auto'});
+                }""")
+                page.wait_for_timeout(DELAYS["dropdown_scroll"])
+
         page.keyboard.press("Escape")
+        return False, display
+
+    # 第一次尝试
+    found, matched_display = _open_and_search(scroll_attempts=15)
+
+    # 首次失败 → 关掉下拉框稍等，重新打开再试一次（防止页面未稳定）
+    if not found:
+        print(f"  [currency] First pass failed, retrying...")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(500)
+        wait_for_loading_gone(page)
+        found, matched_display = _open_and_search(scroll_attempts=15)
+
+    if not found:
         print(f"  [currency] FAIL: {display} not found in dropdown")
         return False
 
@@ -295,8 +313,6 @@ def select_currency(page, currency: str) -> bool:
     else:
         print(f"  [currency] FAIL: Expected {display}, got '{actual}'")
         return False
-
-
 # ═══════════════════════════════════════
 #  Step 2: Enter Amount + Verify
 # ═══════════════════════════════════════

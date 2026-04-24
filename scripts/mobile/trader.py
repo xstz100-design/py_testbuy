@@ -398,84 +398,125 @@ def select_currency(page, currency: str) -> bool:
     page.wait_for_timeout(DELAYS["input_verify"])
     close_market_popup(page)
 
-    # 切换分类 tab
+    # ── 切换分类 tab ──
+    # category 来自 config: "crypto" / "commodity" / "forex" / "index"
     if category != "crypto":
-        tab_map = {
-            "forex": ["Forex", "FX", "外汇"],
-            "commodities": ["Commodities", "商品", "Gold"],
-            "indices": ["Indices", "指数"],
+        tab_map: dict[str, list[str]] = {
+            "forex":     ["Forex", "FX", "外汇"],
+            "commodity": ["Commodities", "Commodity", "商品"],
+            "index":     ["Indices", "Index", "指数"],
         }
-        page.evaluate("""(texts) => {
+        tab_texts = tab_map.get(category, [category.capitalize()])
+        # JS: 遍历所有可见的短文字元素，精确匹配再宽松匹配
+        clicked_tab = page.evaluate("""(texts) => {
+            const candidates = Array.from(document.querySelectorAll(
+                'div, span, button, a, li'));
+            // 先精确匹配
             for (const text of texts) {
-                for (const el of document.querySelectorAll(
-                    'div, span, button, a')) {
+                for (const el of candidates) {
                     const c = el.textContent.trim();
-                    if (c === text || c.includes(text)) {
-                        const r = el.getBoundingClientRect();
-                        if (r.width > 30 && r.width < 200
-                            && r.height > 20 && r.height < 80) {
-                            el.click(); return;
-                        }
+                    if (c !== text) continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 20 && r.width < 250 && r.height > 15 && r.height < 100) {
+                        el.click(); return text;
                     }
                 }
             }
-        }""", tab_map.get(category, [category]))
+            // 再宽松匹配（包含即可）
+            for (const text of texts) {
+                for (const el of candidates) {
+                    const c = el.textContent.trim();
+                    if (!c.includes(text)) continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 20 && r.width < 250 && r.height > 15 && r.height < 100) {
+                        el.click(); return text + '(partial)';
+                    }
+                }
+            }
+            return null;
+        }""", tab_texts)
+        if clicked_tab:
+            print(f"  [currency] Switched to tab: {clicked_tab}")
+        else:
+            print(f"  [currency] WARN: tab not found for category={category}, proceeding anyway")
         page.wait_for_timeout(800)
 
-    # 找到并点击币种行
-    navigated = False
-    # 先向上滚动到顶部（尝试多种滚动容器）
-    page.evaluate("""() => {
-        (document.scrollingElement || document.body).scrollTo(0, 0);
-        document.querySelectorAll('div, section').forEach(el => {
-            if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 300) {
-                el.scrollTo(0, 0);
-            }
-        });
-        window.scrollTo(0, 0);
-    }""")
-    page.wait_for_timeout(500)
+    def _find_and_tap_currency() -> bool:
+        """Scan visible items and tap the matching currency row. Returns True on success."""
+        # 大小写不敏感：多种变体
+        search_texts = list(dict.fromkeys([
+            display, display.upper(), display.lower(),
+            display.capitalize(), display.title(),
+            currency.upper(), currency.lower(), currency.title(),
+        ]))
+        # 先滚回顶部
+        page.evaluate("""() => {
+            (document.scrollingElement || document.body).scrollTo(0, 0);
+            document.querySelectorAll('div, section').forEach(el => {
+                if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 300)
+                    el.scrollTo(0, 0);
+            });
+            window.scrollTo(0, 0);
+        }""")
+        page.wait_for_timeout(400)
 
-    # 大小写不敏感：尝试多种变体 e.g. ["BTC", "btc", "Btc"]
-    search_texts = list(dict.fromkeys([
-        display, display.upper(), display.lower(),
-        display.capitalize(), display.title(),
-        currency.upper(), currency.lower(), currency.title(),
-    ]))
-    for attempt in range(12):
-        if attempt == 0:
-            close_market_popup(page)
-        spans = page.locator("span, div").all()
-        for el in spans:
-            try:
-                text = el.text_content().strip()
-                if text not in search_texts:
+        for attempt in range(14):
+            if attempt == 0:
+                close_market_popup(page)
+            spans = page.locator("span, div").all()
+            for el in spans:
+                try:
+                    text = el.text_content().strip()
+                    if text not in search_texts:
+                        continue
+                    box = el.bounding_box()
+                    if box and box["height"] > 20 and box["y"] >= 0:
+                        parent = el.locator("xpath=..").first
+                        parent.tap()
+                        return True
+                except Exception:
                     continue
-                box = el.bounding_box()
-                if box and box["height"] > 20 and box["y"] >= 0:
-                    parent = el.locator("xpath=..").first
-                    parent.tap()
-                    navigated = True
-                    break
-            except Exception:
-                continue
-        if navigated:
-            break
-        if attempt < 11:
-            # First half: scroll down, second half: scroll up
-            direction = 300 if attempt < 6 else -300
-            page.evaluate(f"""() => {{
-                const c = document.scrollingElement || document.body;
-                c.scrollBy({{top: {direction}, behavior: 'smooth'}});
-                window.scrollBy({{top: {direction}, behavior: 'smooth'}});
-            }}""")
-            page.wait_for_timeout(800)
+            if attempt < 13:
+                # 前半程向下滚，后半程向上滚（来回扫一遍）
+                direction = 300 if attempt < 7 else -300
+                page.evaluate(f"""() => {{
+                    const c = document.scrollingElement || document.body;
+                    c.scrollBy({{top: {direction}, behavior: 'smooth'}});
+                    window.scrollBy({{top: {direction}, behavior: 'smooth'}});
+                }}""")
+                page.wait_for_timeout(700)
+        return False
+
+    # 找到并点击币种行
+    navigated = _find_and_tap_currency()
+
+    # 首次失败 → 回到列表页重试一次（有时页面还在加载中）
+    if not navigated:
+        print(f"  [currency] First pass failed, reloading list and retrying...")
+        page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(DELAYS["page_load"])
+        close_market_popup(page)
+        # 重新切 tab
+        if category != "crypto":
+            tab_texts = tab_map.get(category, [category.capitalize()])  # type: ignore[possibly-undefined]
+            page.evaluate("""(texts) => {
+                for (const text of texts) {
+                    for (const el of document.querySelectorAll('div,span,button,a,li')) {
+                        const c = el.textContent.trim();
+                        if (c === text || c.includes(text)) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 20 && r.width < 250 && r.height > 15)
+                                { el.click(); return; }
+                        }
+                    }
+                }
+            }""", tab_texts)
+            page.wait_for_timeout(900)
+        navigated = _find_and_tap_currency()
 
     if not navigated:
         print(f"  [currency] FAIL: {display} not found in market list")
         return False
-
-    print(f"  [currency] Tapped {display}")
 
     # ── 验证跳转到 chart 页面 ──
     try:
