@@ -100,3 +100,66 @@ def get_display(currency):
 
 def get_category(currency):
     return CURRENCY_CATEGORIES.get(currency.upper(), "crypto")
+
+
+# Aliases for common typos / case variations → canonical name
+# Keys must be lowercase for case-insensitive matching
+CURRENCY_ALIASES: dict[str, str] = {
+    # Crude Oil (WTI)
+    "crude oil":   "CRUDE OIL",
+    "crudeoil":    "CRUDE OIL",
+    "crude_oil":   "CRUDE OIL",
+    "crude-oil":   "CRUDE OIL",
+    "crude":       "CRUDE OIL",
+    "wti":         "CRUDE OIL",
+    "oil":         "CRUDE OIL",
+    "usoil":       "CRUDE OIL",
+    "us oil":      "CRUDE OIL",
+    "wti oil":     "CRUDE OIL",
+    # Brent Oil
+    "brent oil":   "BRENT OIL",
+    "brentoil":    "BRENT OIL",
+    "brent_oil":   "BRENT OIL",
+    "brent-oil":   "BRENT OIL",
+    "brent":       "BRENT OIL",
+    "ukoil":       "BRENT OIL",
+    "uk oil":      "BRENT OIL",
+    "brent crude": "BRENT OIL",
+    # Gold
+    "gold":        "GOLD",
+    "xau":         "GOLD",
+    "xauusd":      "GOLD",
+    "xau/usd":     "GOLD",
+    # Silver
+    "silver":      "SILVER",
+    "xag":         "SILVER",
+    "xagusd":      "SILVER",
+    "xag/usd":     "SILVER",
+}
+
+
+def normalize_currency(currency: str) -> str:
+    """Normalize user input to the canonical currency name.
+    Handles common typos, abbreviations, case variations, and near-typos via fuzzy matching."""
+    import difflib
+    key = currency.strip().lower()
+
+    # 1. Exact alias match
+    if key in CURRENCY_ALIASES:
+        return CURRENCY_ALIASES[key]
+
+    # 2. Exact canonical match (e.g. "BTC", "ETH")
+    upper = currency.strip().upper()
+    if upper in CURRENCY_CATEGORIES:
+        return upper
+
+    # 3. Fuzzy match against all known canonical names
+    all_canonical = list(CURRENCY_CATEGORIES.keys())
+    candidates = {v for v in CURRENCY_ALIASES.values()} | set(all_canonical)
+    matches = difflib.get_close_matches(upper, candidates, n=1, cutoff=0.6)
+    if matches:
+        print(f"[normalize] Fuzzy matched '{currency}' -> '{matches[0]}'")
+        return matches[0]
+
+    # 4. Fallback: return uppercased as-is
+    return upper
