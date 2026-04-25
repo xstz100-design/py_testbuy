@@ -234,19 +234,48 @@ def _close_result_popup(page):
 
 
 def _dismiss_notifications(page):
-    """Dismiss any Ant Design notification toasts (e.g. market-closed alerts).
-    These can appear over the trading UI and intercept clicks.
+    """Dismiss any notification toasts that can overlay the trading UI and intercept clicks.
+    Handles:
+      - Ant Design .ant-notification-notice-close
+      - Custom site notification with img[alt="close"] close button
     """
     _safe_eval(page, """() => {
-        // Ant Design notification close buttons
+        // Ant Design standard notification close buttons
         document.querySelectorAll(
             '.ant-notification-notice-close, .ant-notification-close-icon'
         ).forEach(el => el.click());
-        // Any generic notification/toast
+        // Generic class-name-based close buttons
         document.querySelectorAll(
             '[class*="notice-close"], [class*="toast-close"], [class*="alert-close"]'
         ).forEach(el => el.click());
+        // Custom site notification: img[alt="close"] or img[alt="Close"] in a notification container
+        document.querySelectorAll(
+            'img[alt="close"], img[alt="Close"]'
+        ).forEach(img => {
+            // Only click if it looks like a notification close (not chart/modal close)
+            const p = img.closest(
+                '[class*="notification"], [class*="Notification"], [class*="notice"], [class*="Notice"],'
+                + '[class*="toast"], [class*="Toast"], [class*="alert"], [class*="Alert"]'
+            );
+            // If no specific parent found, check if its container has a Notification heading
+            if (!p) {
+                const container = img.parentElement && img.parentElement.parentElement;
+                if (container && container.textContent.includes('Notification')) {
+                    img.click();
+                }
+            } else {
+                img.click();
+            }
+        });
     }""")
+    # Also try Playwright-level click on the custom notification close img
+    try:
+        notify_close = page.locator('img[alt="close"]').first
+        if notify_close.count() > 0 and notify_close.is_visible():
+            notify_close.click(force=True)
+            page.wait_for_timeout(200)
+    except Exception:
+        pass
 
 
 def _recover_to_trade_page(page, context):
@@ -445,7 +474,16 @@ def select_currency(page, currency: str) -> bool:
         actual = _get_selected()
         if actual.upper() == display.upper():
             print(f"  [currency] [OK] Selected: {actual}")
-            page.wait_for_timeout(DELAYS["spa_switch"])
+            # Wait for SPA re-render: amount input must be ready before returning
+            try:
+                page.wait_for_selector(
+                    'input[type="text"]', state='visible',
+                    timeout=max(DELAYS["spa_switch"] * 6, 3000)
+                )
+            except Exception:
+                page.wait_for_timeout(DELAYS["spa_switch"])
+            # Dismiss any notification that appeared after currency switch
+            _dismiss_notifications(page)
             return True
         print(f"  [currency] Mismatch: got '{actual}', want '{display}'")
         page.keyboard.press("Escape")
@@ -459,15 +497,26 @@ def select_currency(page, currency: str) -> bool:
 def enter_amount(page, amount: str) -> bool:
     print(f"  [amount] Setting {amount}...")
     wait_for_loading_gone(page)
+    # Dismiss any notification overlay before interacting with the amount input
+    _dismiss_notifications(page)
     page.keyboard.press("Escape")
     page.wait_for_timeout(200)
 
     # The trade amount field is the only input[type="text"] on the page.
-    # Parent class="middle". NOT the Ant Design search input (type=search, readonly).
+    # NOT the Ant Design search input (type=search, id=rc_select_N, readOnly=True).
     inp = page.locator('input[type="text"]').first
+
+    # Wait properly for the amount input to be visible (Playwright native, not manual polling)
+    # This handles slow SPA re-renders after currency switch.
+    try:
+        page.wait_for_selector('input[type="text"]', state='visible', timeout=8000)
+    except Exception:
+        print("  [amount] WARN: input not visible after 8s, will still try")
 
     # 最多重试 3 次（SPA 切币后可能短暂 reset input）
     for attempt in range(3):
+        # Re-dismiss notifications on each attempt (they may re-appear)
+        _dismiss_notifications(page)
         for _ in range(8):
             try:
                 if inp.count() > 0 and inp.is_visible():
