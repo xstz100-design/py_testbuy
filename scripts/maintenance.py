@@ -27,7 +27,6 @@ except ImportError:
 ROOT_DIR = Path(__file__).resolve().parent
 SCREENSHOT_DIRS = [
     ROOT_DIR / "screenshots",
-    ROOT_DIR / "bptrading" / "screenshots",
 ]
 LOG_FILES = [
     ROOT_DIR / "watchdog.log",

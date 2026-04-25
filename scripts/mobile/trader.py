@@ -1,14 +1,13 @@
 """BPTrading Mobile Trade - Python + Playwright (Chromium iPhone Emulation)
 
 State-Machine Flow:
-  1. desktop_login()   — Phase 1: Chromium 桌面登录 → 保存 session
-  2. mobile_open()     — Phase 2: Chromium iPhone 模拟 → 加载 session
-  3. ensure_idle()     — 确认无活跃交易 / 关闭残留弹窗
-  4. select_currency() + verify  — 选币种 → 验证跳转到 chart 页
-  5. enter_amount() + verify     — 设金额 → 验证 input 值
-  6. select_duration() + verify  — 选时长 → 验证显示
-  7. click_direction() + verify  — 下单   → 验证进入 ACTIVE 状态
-  8. wait_for_result()           — 等结算 → 截图 → 关闭弹窗 → 回到 IDLE
+  1. mobile_open()     — Chromium iPhone 模拟 → 自动登录（若 session 失效）
+  2. ensure_idle()     — 确认无活跃交易 / 关闭残留弹窗
+  3. select_currency() + verify  — 选币种 → 验证跳转到 chart 页
+  4. enter_amount() + verify     — 设金额 → 验证 input 值
+  5. select_duration() + verify  — 选时长 → 验证显示
+  6. click_direction() + verify  — 下单   → 验证进入 ACTIVE 状态
+  7. wait_for_result()           — 等结算 → 截图 → 关闭弹窗 → 回到 IDLE
 """
 import sys
 import os
@@ -1011,7 +1010,6 @@ def run(currency, amount, duration, direction, rounds):
         MAX_RETRIES = 3
         results = []
         try:
-            desktop_login(p)
             browser, ctx, page = mobile_open(p)
 
             for r in range(1, rounds + 1):

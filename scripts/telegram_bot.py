@@ -1387,7 +1387,7 @@ def main():
 
     while True:
         try:
-            print("[telegram] Bot listener started (per-user concurrent mode)")
+            print("[telegram] Bot listener started (per-user serial queue mode)")
             print(
                 f"[telegram] Allowed chats: "
                 f"{sorted(ALLOWED_CHAT_IDS) if ALLOWED_CHAT_IDS else 'ALL'}"

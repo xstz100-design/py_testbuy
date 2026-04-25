@@ -18,7 +18,7 @@ AUTH_FILE = Path(__file__).resolve().parent / "auth.json"
 def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, args=["--start-maximized"])
-        context_kwargs = {"viewport": {"width": 1440, "height": 900}}
+        context_kwargs: dict = {"viewport": {"width": 1440, "height": 900}}
         if AUTH_FILE.exists():
             context_kwargs["storage_state"] = str(AUTH_FILE)
         context = browser.new_context(**context_kwargs)

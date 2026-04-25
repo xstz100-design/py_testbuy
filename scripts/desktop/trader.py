@@ -204,8 +204,9 @@ def _recover_to_trade_page(page, context):
         state = get_page_state(page)
         if state == "login":
             raise RuntimeError("on login page")
-        # Check trade UI: currency <select> must exist on the trade page
-        if page.locator("select").count() == 0:
+        # Check trade UI: amount input[type="text"] must exist on the trade page
+        # (Ant Design has no native <select> elements)
+        if page.locator('input[type="text"]').count() == 0:
             raise RuntimeError("trade UI not found")
         return  # 页面正常，无需恢复
     except Exception as e:
