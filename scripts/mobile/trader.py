@@ -484,7 +484,7 @@ def select_currency(page, currency: str) -> bool:
 
             # ── Strategy 2: JS broad exact scan (ALL li/div/span) ──
             # Uses direct text node content — immune to class name changes
-            found = page.evaluate("""(upperTexts, rawTexts) => {
+            found = page.evaluate("""({upperTexts, rawTexts}) => {
                 const all = document.querySelectorAll('li, div, span, td');
                 for (const el of all) {
                     // Only look at direct text content (not aggregated child text)
@@ -509,7 +509,7 @@ def select_currency(page, currency: str) -> bool:
                     return own;
                 }
                 return null;
-            }""", [t.upper() for t in search_texts], search_texts)
+            }""", {"upperTexts": [t.upper() for t in search_texts], "rawTexts": search_texts})
             if found:
                 print(f"  [currency] Tapped via JS broad scan: {found}")
                 return True
