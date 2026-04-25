@@ -204,8 +204,8 @@ def _recover_to_trade_page(page, context):
         state = get_page_state(page)
         if state == "login":
             raise RuntimeError("on login page")
-        # 额外检查 ant-select（交易下拉）是否存在
-        if page.locator(".ant-select").count() == 0:
+        # Check trade UI: currency <select> must exist on the trade page
+        if page.locator("select").count() == 0:
             raise RuntimeError("trade UI not found")
         return  # 页面正常，无需恢复
     except Exception as e:
@@ -289,133 +289,87 @@ def select_currency(page, currency: str) -> bool:
     display = get_display(currency)
     print(f"  [currency] Selecting {display}...")
 
-    # Guard: must be on trade page (not login page) before touching ant-select
     if page.locator('input[type="password"]').count() > 0:
-        print("  [currency] WARN: still on login page, cannot select")
+        print("  [currency] WARN: on login page, cannot select")
         return False
 
-    variants = list(dict.fromkeys([
-        display, display.upper(), display.lower(),
-        display.capitalize(), display.title(),
-    ]))
+    def _get_selected() -> str:
+        """Read .ant-select-selection-item text (Ant Design selected label)."""
+        try:
+            el = page.locator('.ant-select-selection-item').first
+            if el.count() > 0:
+                return el.text_content().strip()
+        except Exception:
+            pass
+        return ""
 
     def _open_dropdown() -> bool:
-        """Open the currency dropdown. Returns True if dropdown appeared."""
-        for sel in [".ant-select-selector", ".ant-select"]:
-            try:
-                el = page.locator(sel).first
-                if el.count() > 0:
-                    el.click(force=True)
-                    page.wait_for_timeout(250)
-                    if page.locator(".ant-select-dropdown").count() > 0:
-                        return True
-            except Exception:
-                pass
-        # Last resort: JS click
-        _safe_eval(page, """() => {
-            const el = document.querySelector('.ant-select-selector')
-                    || document.querySelector('.ant-select');
-            if (el) el.click();
-        }""")
-        page.wait_for_timeout(300)
+        """Click .ant-select-selector to open Ant Design dropdown."""
         try:
-            return page.locator(".ant-select-dropdown").count() > 0
+            page.locator('.ant-select-selector').first.click(force=True)
+            page.wait_for_timeout(350)
+            return page.locator('.ant-select-dropdown').count() > 0
         except Exception:
             return False
 
-    def _click_item_in_dom() -> bool:
-        """Try to directly JS-click a matching item currently in the DOM."""
-        return bool(_safe_eval(page, """(variants) => {
+    def _click_item() -> bool:
+        """JS-click the matching .ant-select-item-option in the open dropdown."""
+        return bool(_safe_eval(page, """(target) => {
+            // Primary: match .ant-select-item-option by full textContent
             const items = document.querySelectorAll(
-                '.ant-select-item-option:not(.ant-select-item-option-disabled)');
+                '.ant-select-item.ant-select-item-option:not(.ant-select-item-option-disabled)');
             for (const item of items) {
-                const title = (item.getAttribute('title') || '').trim();
-                const text  = item.textContent.trim();
-                for (const v of variants) {
-                    if (title.toLowerCase() === v.toLowerCase()
-                        || text.toLowerCase()  === v.toLowerCase()) {
-                        item.click();
-                        return true;
-                    }
+                if (item.textContent.trim().toUpperCase() === target.toUpperCase()) {
+                    item.click();
+                    return true;
+                }
+            }
+            // Fallback: .ant-select-item-option-content
+            const contents = document.querySelectorAll('.ant-select-item-option-content');
+            for (const c of contents) {
+                if (c.textContent.trim().toUpperCase() === target.toUpperCase()) {
+                    c.click();
+                    return true;
                 }
             }
             return false;
-        }""", variants, default=False))
+        }""", display, default=False))
 
-    def _scroll_and_find(scroll_steps: int = 25) -> bool:
-        """Scroll through virtual list to find item."""
-        _safe_eval(page, """() => {
-            const h = document.querySelector('.rc-virtual-list-holder')
-                   || document.querySelector('.ant-select-dropdown');
-            if (h && h.scrollTo) h.scrollTo({top: 0, behavior: 'instant'});
-        }""")
-        page.wait_for_timeout(100)
-        for _ in range(scroll_steps):
-            if _click_item_in_dom():
-                return True
-            # Also try Playwright title selector (catches items evaluate might miss)
-            for variant in variants:
-                try:
-                    item = page.locator(f'.ant-select-item[title="{variant}"]')
-                    if item.count() > 0:
-                        item.first.click(force=True)
-                        return True
-                except Exception:
-                    pass
-            _safe_eval(page, """() => {
-                const h = document.querySelector(
-                    '.ant-select-dropdown .rc-virtual-list-holder')
-                    || document.querySelector('.ant-select-dropdown');
-                if (h) h.scrollBy({top: 90, behavior: 'instant'});
-            }""")
-            page.wait_for_timeout(DELAYS["dropdown_scroll"])
-        return False
+    # Already correct?
+    if _get_selected().upper() == display.upper():
+        print(f"  [currency] ✓ Already on {display}")
+        page.wait_for_timeout(DELAYS["spa_switch"])
+        return True
 
-    def _try_once() -> bool:
-        wait_for_loading_gone(page)
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(200)
-
-        opened = _open_dropdown()
-        if not opened:
-            print("  [currency] Dropdown did not open, retrying...")
-            page.wait_for_timeout(400)
-            opened = _open_dropdown()
-        if not opened:
-            print("  [currency] Dropdown still not open")
-            return False
-
-        # Path 1: direct JS click (item already in DOM viewport)
-        if _click_item_in_dom():
-            return True
-
-        # Path 2: scroll through virtual list
-        if _scroll_and_find(scroll_steps=25):
-            return True
-
-        page.keyboard.press("Escape")
-        return False
-
-    # Up to 3 attempts, 500ms gap between
     for attempt in range(3):
         if attempt > 0:
             print(f"  [currency] Retry {attempt}...")
-            page.wait_for_timeout(500)
-        if _try_once():
-            page.wait_for_timeout(200)
-            try:
-                selected = page.locator(".ant-select-selection-item").first
-                actual = selected.text_content().strip() if selected.count() > 0 else ""
-            except Exception:
-                actual = ""
-            if actual.upper() == display.upper():
-                print(f"  [currency] ✓ Verified: {actual}")
-                page.wait_for_timeout(DELAYS["spa_switch"])
-                return True
-            else:
-                print(f"  [currency] Verify failed: got '{actual}', expected '{display}'")
+            page.wait_for_timeout(600)
 
-    print(f"  [currency] FAIL: {display} not found after 3 attempts")
+        wait_for_loading_gone(page)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(150)
+
+        if not _open_dropdown():
+            print(f"  [currency] Dropdown didn't open on attempt {attempt + 1}")
+            continue
+
+        if not _click_item():
+            print(f"  [currency] Item '{display}' not in dropdown on attempt {attempt + 1}")
+            page.keyboard.press("Escape")
+            continue
+
+        page.wait_for_timeout(400)
+        actual = _get_selected()
+        if actual.upper() == display.upper():
+            print(f"  [currency] ✓ Selected: {actual}")
+            page.wait_for_timeout(DELAYS["spa_switch"])
+            return True
+        print(f"  [currency] Mismatch: got '{actual}', want '{display}'")
+        page.keyboard.press("Escape")
+
+    print(f"  [currency] FAIL after 3 attempts")
+    shot(page, f"currency-fail-{display}-{int(time.time())}")
     return False
 # ═══════════════════════════════════════
 #  Step 2: Enter Amount + Verify
@@ -426,32 +380,23 @@ def enter_amount(page, amount: str) -> bool:
     page.keyboard.press("Escape")
     page.wait_for_timeout(200)
 
-    inp = page.locator(
-        'input:visible:not([type="password"]):not([type="hidden"])'
-        ':not([readonly]):not([role="combobox"])'
-    )
+    # The trade amount field is the only input[type="text"] on the page.
+    # Parent class="middle". NOT the Ant Design search input (type=search, readonly).
+    inp = page.locator('input[type="text"]').first
 
-    def _find_target():
-        for i in range(inp.count()):
-            el = inp.nth(i)
-            try:
-                val = el.input_value()
-                if re.match(r"^[\d,]*$", val):
-                    return el
-            except Exception:
-                pass
-        return inp.first if inp.count() > 0 else None
-
-    # 最多重试 3 次（SPA 切币后可能 reset input）
+    # 最多重试 3 次（SPA 切币后可能短暂 reset input）
     for attempt in range(3):
         for _ in range(8):
-            if inp.count() > 0:
-                break
+            try:
+                if inp.count() > 0 and inp.is_visible():
+                    break
+            except Exception:
+                pass
             page.wait_for_timeout(300)
 
-        target = _find_target()
-        if not target:
-            print("  [amount] FAIL: No editable input found")
+        target = inp
+        if inp.count() == 0:
+            print("  [amount] FAIL: No amount input found")
             return False
 
         target.click(click_count=3)
@@ -483,43 +428,49 @@ def select_duration(page, duration: str) -> bool:
     print(f"  [duration] Selecting {dur_text}...")
 
     def _try_click() -> bool:
-        clicked = _safe_eval(page, """(dur) => {
-            const target = dur + 's';
-            for (const el of document.querySelectorAll('*')) {
-                const own = Array.from(el.childNodes)
-                    .filter(n => n.nodeType === 3)
-                    .map(n => n.textContent.trim()).join('');
-                if (own === target) { el.click(); return true; }
-            }
-            for (const el of document.querySelectorAll('*')) {
-                const t = el.textContent.trim();
-                const r = el.getBoundingClientRect();
-                if ((t === target || t.startsWith(target))
-                    && r.width > 20 && r.width < 150 && r.height < 60) {
-                    el.click(); return true;
-                }
-            }
-            return false;
-        }""", duration, default=False)
-        if clicked:
-            return True
-        btn = page.get_by_text(dur_text, exact=True)
+        # Primary: click the real <button> element by exact text
+        btn = page.get_by_role("button", name=dur_text, exact=True)
         if btn.count() > 0:
             btn.first.click()
             return True
-        return False
+        # Fallback: JS scan all buttons for exact text
+        return bool(_safe_eval(page, """(target) => {
+            for (const btn of document.querySelectorAll('button')) {
+                if (btn.textContent.trim() === target) {
+                    btn.click(); return true;
+                }
+            }
+            return false;
+        }""", dur_text, default=False))
+
+    def _verify_active() -> bool:
+        """Check that the duration button now has class 'active'."""
+        return bool(_safe_eval(page, """(target) => {
+            for (const btn of document.querySelectorAll('button')) {
+                if (btn.textContent.trim() === target) {
+                    return btn.className.includes('active');
+                }
+            }
+            return false;
+        }""", dur_text, default=False))
 
     for attempt in range(3):
         wait_for_loading_gone(page)
         if _try_click():
-            page.wait_for_timeout(300)
-            print(f"  [duration] ✓ Selected {dur_text}")
-            return True
+            page.wait_for_timeout(250)
+            if _verify_active():
+                print(f"  [duration] ✓ Active: {dur_text}")
+                return True
+            # Give it a moment more
+            page.wait_for_timeout(250)
+            if _verify_active():
+                print(f"  [duration] ✓ Active (delayed): {dur_text}")
+                return True
         if attempt < 2:
             print(f"  [duration] Retry {attempt + 1}...")
             page.wait_for_timeout(400)
 
-    print(f"  [duration] FAIL: {dur_text} not found after 3 attempts")
+    print(f"  [duration] FAIL: {dur_text} not active after 3 attempts")
     return False
 
 
