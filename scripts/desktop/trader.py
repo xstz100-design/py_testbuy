@@ -112,17 +112,24 @@ def get_page_state(page) -> str:
             return "login"
     except Exception:
         pass
+    # Check result popup: use the precise modal class (fast, no full-DOM walk)
     has_result = _safe_eval(page, """() => {
-        for (const el of document.querySelectorAll('*')) {
-            if (el.textContent.trim() === 'Trade result') {
-                const r = el.getBoundingClientRect();
+        // Primary: specific TradeResultDialog modal class
+        const modal = document.querySelector('.TradeResultDialog_WithdrawDialog_UiWaD');
+        if (modal) {
+            const s = window.getComputedStyle(modal);
+            const r = modal.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0
+                && s.display !== 'none'
+                && s.visibility !== 'hidden'
+                && parseFloat(s.opacity || '1') > 0) return true;
+        }
+        // Fallback: ant-modal containing 'Trade result' title
+        for (const el of document.querySelectorAll('.ant-modal')) {
+            if (el.textContent.includes('Trade result')) {
                 const s = window.getComputedStyle(el);
-                if (r.width > 0 && r.height > 0
-                    && s.display !== 'none'
-                    && s.visibility !== 'hidden'
-                    && parseFloat(s.opacity) > 0) {
-                    return true;
-                }
+                const r = el.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0 && s.display !== 'none') return true;
             }
         }
         return false;
@@ -169,33 +176,71 @@ def ensure_idle(page, timeout_s: int = 120):
 
 
 def _close_result_popup(page):
-    # 方法1: JS click close 按钮
+    """Close the TradeResultDialog ant-modal.
+    NOTE: .stx-ico-close is the CHART panel button — do NOT use it here.
+    The result popup is .TradeResultDialog_WithdrawDialog_UiWaD (ant-modal).
+    Its close button is .ant-modal-close.
+    """
+    # Method 1: Click the correct ant-modal close button inside the result dialog
     _safe_eval(page, """() => {
-        const el = document.querySelector('.stx-ico-close');
-        if (el) { el.click(); return; }
-        const d = document.querySelector('[class*="TradeResultDialog"]');
-        if (d) { const b = d.querySelector('[class*="close"]'); if (b) b.click(); }
+        // Specific: TradeResultDialog close button
+        const specific = document.querySelector(
+            '.TradeResultDialog_WithdrawDialog_UiWaD .ant-modal-close');
+        if (specific) { specific.click(); return; }
+        // Generic ant-modal close (any visible ant-modal)
+        const anyClose = document.querySelector('.ant-modal-close');
+        if (anyClose) { anyClose.click(); return; }
+        // Fallback: click inside TradeResultDialog to trigger close
+        const dialog = document.querySelector('.TradeResultDialog_WithdrawDialog_UiWaD');
+        if (dialog) {
+            const btn = dialog.querySelector('button, [class*="close"], [class*="Close"]');
+            if (btn) btn.click();
+        }
     }""")
-    page.wait_for_timeout(700)
-    # 方法2: 如果弹窗还在，点击空白区域或 X
+    page.wait_for_timeout(600)
+    # Method 2: If popup still visible, click the modal mask (Ant Design maskClosable)
     try:
-        if page.get_by_text("Trade result").count() > 0:
+        modal_visible = _safe_eval(page, """() => {
+            const m = document.querySelector('.TradeResultDialog_WithdrawDialog_UiWaD');
+            if (!m) return false;
+            const r = m.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+        }""", default=False)
+        if modal_visible:
             _safe_eval(page, """() => {
-                document.querySelectorAll('.stx-ico-close').forEach(e => e.click());
-                const overlay = document.querySelector('.ant-modal-wrap, .popup-overlay');
-                if (overlay) overlay.click();
+                const wrap = document.querySelector('.ant-modal-wrap');
+                if (wrap) {
+                    // Click the mask area (outside the dialog content)
+                    wrap.click();
+                }
             }""")
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(400)
     except Exception:
         pass
-    # 方法3: Playwright force click
+    # Method 3: Playwright force click on ant-modal-close
     try:
-        close_x = page.locator(".stx-ico-close")
-        if close_x.count() > 0 and close_x.first.is_visible():
-            close_x.first.click(force=True)
+        close_x = page.locator(".ant-modal-close").first
+        if close_x.count() > 0 and close_x.is_visible():
+            close_x.click(force=True)
+            page.wait_for_timeout(300)
     except Exception:
         pass
-    page.wait_for_timeout(300)
+
+
+def _dismiss_notifications(page):
+    """Dismiss any Ant Design notification toasts (e.g. market-closed alerts).
+    These can appear over the trading UI and intercept clicks.
+    """
+    _safe_eval(page, """() => {
+        // Ant Design notification close buttons
+        document.querySelectorAll(
+            '.ant-notification-notice-close, .ant-notification-close-icon'
+        ).forEach(el => el.click());
+        // Any generic notification/toast
+        document.querySelectorAll(
+            '[class*="notice-close"], [class*="toast-close"], [class*="alert-close"]'
+        ).forEach(el => el.click());
+    }""")
 
 
 def _recover_to_trade_page(page, context):
@@ -542,12 +587,27 @@ def click_direction(page, direction: str) -> bool:
             }
         }""", d)
 
+    # Dismiss any notification toasts that might overlay the buttons
+    _dismiss_notifications(page)
+
     # Up to 3 click attempts — site occasionally needs a moment after amount entry
     for attempt in range(3):
+        # Guard: if already active (from a previous successful click), don't click again
+        pre_state = get_page_state(page)
+        if pre_state == "active":
+            print(f"  [direction] [OK] Already ACTIVE before click (attempt {attempt+1})")
+            return True
+        if pre_state == "result":
+            print(f"  [direction] WARN: result popup open before click — closing")
+            _close_result_popup(page)
+            page.wait_for_timeout(500)
+            continue
+
         wait_for_loading_gone(page)
+        _dismiss_notifications(page)
         _do_click()
         # Wait progressively longer on each attempt
-        page.wait_for_timeout(700 + attempt * 400)
+        page.wait_for_timeout(800 + attempt * 500)
         state = get_page_state(page)
         if state == "active":
             print(f"  [direction] [OK] Order placed, trade ACTIVE (attempt {attempt+1})")
@@ -567,7 +627,7 @@ def wait_for_result(page, duration: str, trade_start: float) -> dict:
     # Must wait at least duration+5s from the moment the order was placed
     # before polling for result, to avoid capturing leftover/stale popups.
     wait_until = trade_start + dur_sec + 5.0
-    max_wait_until = trade_start + dur_sec + 15.0  # absolute ceiling
+    max_wait_until = trade_start + dur_sec + 30.0  # 30s extra ceiling (was 15s)
 
     print(f"  [wait] Trade duration {dur_sec}s — waiting for expiry (≥{dur_sec+5}s)...")
     while time.time() < wait_until:
