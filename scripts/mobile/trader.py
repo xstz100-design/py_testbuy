@@ -270,16 +270,27 @@ def _on_response(response):
         print(f"  [net] Body snippet: {raw[:300]}")
         _network_settlement["raw"] = raw[:1000]
         _network_settlement["detected"] = True
-        # Parse result field: 1=win, 2=loss (BPTrading convention)
         msg = body.get("msg", {})
         result_code = msg.get("result")
-        if result_code == 1:
+        request_amt = float(msg.get("requestAmount", 0) or 0)
+        closed = float(msg.get("closedAmount", 0) or 0)
+        result_amt = float(msg.get("resultAmount", 0) or 0)
+        # Determine win/loss: prefer amount comparison over result code
+        # closedAmount > requestAmount means profit was returned → win
+        if request_amt > 0 and closed > 0:
+            _network_settlement["won"] = closed >= request_amt
+        elif result_amt > 0:
+            _network_settlement["won"] = True
+        elif result_amt < 0:
+            _network_settlement["won"] = False
+        elif result_code == 1:
             _network_settlement["won"] = True
         elif result_code == 2:
             _network_settlement["won"] = False
-        # Parse profit from closedAmount/resultAmount
-        closed = msg.get("closedAmount", 0)
-        if closed and float(closed) > 0:
+        # Parse profit: use resultAmount (net profit) if positive, else closedAmount
+        if result_amt > 0:
+            _network_settlement["profit"] = str(result_amt)
+        elif closed > 0:
             _network_settlement["profit"] = str(closed)
     except Exception:
         pass
