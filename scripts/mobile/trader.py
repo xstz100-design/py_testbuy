@@ -1,4 +1,4 @@
-"""BPTrading Mobile Trade - Python + Playwright (Chromium iPhone Emulation)
+﻿"""BPTrading Mobile Trade - Python + Playwright (Chromium iPhone Emulation)
 
 State-Machine Flow:
   1. mobile_open()     — Chromium iPhone 模拟 → 自动登录（若 session 失效）
@@ -575,7 +575,7 @@ def select_currency(page, currency: str) -> bool:
             return False
 
     page.wait_for_timeout(400)
-    print(f"  [currency] ✓ Trade panel loaded for {display}")
+    print(f"  [currency] [OK] Trade panel loaded for {display}")
     return True
 
 
@@ -613,7 +613,7 @@ def enter_amount(page, amount: str) -> bool:
         # Verify
         actual = inp.input_value().replace(",", "")
         if actual == amount:
-            print(f"  [amount] ✓ Verified: {actual}")
+            print(f"  [amount] [OK] Verified: {actual}")
             return True
 
         print(f"  [amount] Attempt {attempt + 1}: expected {amount}, got '{actual}', retrying...")
@@ -675,10 +675,10 @@ def select_duration(page, duration: str) -> bool:
     time_display = page.locator(".time-content .time, .time-content").first \
         .text_content().strip()
     if duration in time_display:
-        print(f"  [duration] ✓ Verified: {time_display}")
+        print(f"  [duration] [OK] Verified: {time_display}")
         return True
     elif selected == "ok":
-        print(f"  [duration] ✓ Selected {dur_text} (display: {time_display})")
+        print(f"  [duration] [OK] Selected {dur_text} (display: {time_display})")
         return True
     else:
         print(f"  [duration] FAIL: {dur_text} not found (display: {time_display})")
@@ -722,7 +722,7 @@ def click_direction(page, direction: str):
         state = get_page_state(page)
         if state == "active":
             trade_start = time.time()
-            print(f"  [direction] ✓ Order placed, trade ACTIVE (attempt {attempt + 1})")
+            print(f"  [direction] [OK] Order placed, trade ACTIVE (attempt {attempt + 1})")
             # 立即安装 MutationObserver 捕获结算弹窗
             _install_settlement_observer(page)
             return trade_start

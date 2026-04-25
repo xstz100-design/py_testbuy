@@ -1,4 +1,4 @@
-"""BPTrading Desktop Trade - Python + Playwright (Chromium)
+﻿"""BPTrading Desktop Trade - Python + Playwright (Chromium)
 
 State-Machine Flow:
   1. ensure_idle()  — 确认无活跃交易 / 关闭残留弹窗
@@ -308,37 +308,67 @@ def select_currency(page, currency: str) -> bool:
         """Click .ant-select-selector to open Ant Design dropdown."""
         try:
             page.locator('.ant-select-selector').first.click(force=True)
-            page.wait_for_timeout(350)
+            # Wait for dropdown AND at least one item to be visible
+            try:
+                page.wait_for_selector(
+                    '.ant-select-dropdown .ant-select-item-option',
+                    state='visible', timeout=3000
+                )
+            except Exception:
+                page.wait_for_timeout(500)
             return page.locator('.ant-select-dropdown').count() > 0
         except Exception:
             return False
 
     def _click_item() -> bool:
-        """JS-click the matching .ant-select-item-option in the open dropdown."""
-        return bool(_safe_eval(page, """(target) => {
-            // Primary: match .ant-select-item-option by full textContent
-            const items = document.querySelectorAll(
-                '.ant-select-item.ant-select-item-option:not(.ant-select-item-option-disabled)');
-            for (const item of items) {
-                if (item.textContent.trim().toUpperCase() === target.toUpperCase()) {
-                    item.click();
-                    return true;
+        """Scroll virtual list to find and JS-click the target item.
+        The Ant Design dropdown uses rc-virtual-list — only ~10 items are
+        rendered at a time. We must scroll the holder to bring the target
+        item into the DOM before clicking.
+        """
+        return bool(_safe_eval(page, """async (target) => {
+            const tgt = target.toLowerCase();
+
+            const tryClick = () => {
+                const items = document.querySelectorAll(
+                    '.ant-select-item.ant-select-item-option:not(.ant-select-item-option-disabled)');
+                for (const item of items) {
+                    if (item.textContent.trim().toLowerCase() === tgt) {
+                        item.click();
+                        return true;
+                    }
                 }
-            }
-            // Fallback: .ant-select-item-option-content
-            const contents = document.querySelectorAll('.ant-select-item-option-content');
-            for (const c of contents) {
-                if (c.textContent.trim().toUpperCase() === target.toUpperCase()) {
-                    c.click();
-                    return true;
+                const contents = document.querySelectorAll('.ant-select-item-option-content');
+                for (const c of contents) {
+                    if (c.textContent.trim().toLowerCase() === tgt) {
+                        c.click();
+                        return true;
+                    }
                 }
+                return false;
+            };
+
+            // Try currently visible items first (covers items 0-9)
+            if (tryClick()) return true;
+
+            // Scroll the virtual list in steps to render remaining items
+            const holder = document.querySelector('.rc-virtual-list-holder');
+            if (!holder) return false;
+
+            const totalH = holder.scrollHeight;
+            const step = 56;  // ~2 items per step
+            for (let pos = step; pos <= totalH + step; pos += step) {
+                holder.scrollTop = pos;
+                await new Promise(r => setTimeout(r, 60));
+                if (tryClick()) return true;
             }
+
             return false;
         }""", display, default=False))
 
     # Already correct?
     if _get_selected().upper() == display.upper():
-        print(f"  [currency] ✓ Already on {display}")
+        print(f"  [currency] [OK] Already on {display}")
         page.wait_for_timeout(DELAYS["spa_switch"])
         return True
 
@@ -363,7 +393,7 @@ def select_currency(page, currency: str) -> bool:
         page.wait_for_timeout(400)
         actual = _get_selected()
         if actual.upper() == display.upper():
-            print(f"  [currency] ✓ Selected: {actual}")
+            print(f"  [currency] [OK] Selected: {actual}")
             page.wait_for_timeout(DELAYS["spa_switch"])
             return True
         print(f"  [currency] Mismatch: got '{actual}', want '{display}'")
@@ -410,7 +440,7 @@ def enter_amount(page, amount: str) -> bool:
 
         actual = target.input_value().replace(",", "")
         if actual == amount:
-            print(f"  [amount] ✓ Verified: {actual}")
+            print(f"  [amount] [OK] Verified: {actual}")
             return True
         elif attempt < 2:
             print(f"  [amount] Retry {attempt+1}: got '{actual}', expected {amount}")
@@ -460,12 +490,12 @@ def select_duration(page, duration: str) -> bool:
         if _try_click():
             page.wait_for_timeout(250)
             if _verify_active():
-                print(f"  [duration] ✓ Active: {dur_text}")
+                print(f"  [duration] [OK] Active: {dur_text}")
                 return True
             # Give it a moment more
             page.wait_for_timeout(250)
             if _verify_active():
-                print(f"  [duration] ✓ Active (delayed): {dur_text}")
+                print(f"  [duration] [OK] Active (delayed): {dur_text}")
                 return True
         if attempt < 2:
             print(f"  [duration] Retry {attempt + 1}...")
@@ -520,7 +550,7 @@ def click_direction(page, direction: str) -> bool:
         page.wait_for_timeout(700 + attempt * 400)
         state = get_page_state(page)
         if state == "active":
-            print(f"  [direction] ✓ Order placed, trade ACTIVE (attempt {attempt+1})")
+            print(f"  [direction] [OK] Order placed, trade ACTIVE (attempt {attempt+1})")
             return True
         if attempt < 2:
             print(f"  [direction] State '{state}' after attempt {attempt+1}, retrying...")
