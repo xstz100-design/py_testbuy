@@ -105,41 +105,46 @@ def _safe_eval(page, js, arg=None, default=None):
 
 
 def get_page_state(page) -> str:
-    """返回页面当前状态: idle / active / result / login"""
-    # Quick login-page check first (avoid mis-reading ant-select on login)
+    """返回页面当前状态: idle / active / result / login
+
+    DOM 结构（实测）:
+      IDLE:   amount textbox + duration buttons + up/down buttons 可见；无 "Expiration time"
+      ACTIVE: 以上全消失，出现 "Expiration time" 倒计时面板
+      RESULT: 交易结束，IDLE 表单重新出现，同时弹出 role=dialog 的结果弹窗
+              dialog 的 accessible name 包含 "Trade result"；关闭按钮 button "Close"
+    """
+    # Quick login-page check first
     try:
         if page.locator('input[type="password"]').count() > 0:
             return "login"
     except Exception:
         pass
-    # Check result popup: use the precise modal class (fast, no full-DOM walk)
+    # Check result popup via role="dialog" + "Trade result" text (most reliable)
+    try:
+        dlg = page.get_by_role("dialog").filter(
+            has_text=re.compile(r"Trade result", re.I)
+        )
+        if dlg.count() > 0:
+            return "result"
+    except Exception:
+        pass
+    # Fallback: JS-based check for any visible dialog containing "Trade result"
     has_result = _safe_eval(page, """() => {
-        // Primary: specific TradeResultDialog modal class
-        const modal = document.querySelector('.TradeResultDialog_WithdrawDialog_UiWaD');
-        if (modal) {
-            const s = window.getComputedStyle(modal);
-            const r = modal.getBoundingClientRect();
+        const dialogs = document.querySelectorAll('[role="dialog"]');
+        for (const d of dialogs) {
+            if (!d.textContent.includes('Trade result')) continue;
+            const r = d.getBoundingClientRect();
+            const s = window.getComputedStyle(d);
             if (r.width > 0 && r.height > 0
-                && s.display !== 'none'
-                && s.visibility !== 'hidden'
-                && parseFloat(s.opacity || '1') > 0) return true;
-        }
-        // Fallback: ant-modal containing 'Trade result' title
-        for (const el of document.querySelectorAll('.ant-modal')) {
-            if (el.textContent.includes('Trade result')) {
-                const s = window.getComputedStyle(el);
-                const r = el.getBoundingClientRect();
-                if (r.width > 0 && r.height > 0 && s.display !== 'none') return true;
-            }
+                && s.display !== 'none' && s.visibility !== 'hidden') return true;
         }
         return false;
     }""", default=False)
     if has_result:
         return "result"
+    # ACTIVE: "Expiration time" countdown panel is visible (absent in IDLE)
     try:
         if page.locator("text=Expiration time").count() > 0:
-            return "active"
-        if page.locator("text=Estimate profit").count() > 0:
             return "active"
     except Exception:
         pass
@@ -176,55 +181,56 @@ def ensure_idle(page, timeout_s: int = 120):
 
 
 def _close_result_popup(page):
-    """Close the TradeResultDialog ant-modal.
-    NOTE: .stx-ico-close is the CHART panel button — do NOT use it here.
-    The result popup is .TradeResultDialog_WithdrawDialog_UiWaD (ant-modal).
-    Its close button is .ant-modal-close.
+    """Close the Trade Result dialog.
+
+    DOM 实测（2026-04-25）:
+      - 结果弹窗是 role="dialog"，accessible name = "Trade result Profit: X"
+      - 关闭按钮: button "Close"（accessible name），内含 img[alt="close"]
+      - 注意: .stx-ico-close 是图表面板按钮，不要用它！
+      - 注意: .ant-modal-close 可能不存在，此按钮是自定义结构
     """
-    # Method 1: Click the correct ant-modal close button inside the result dialog
-    _safe_eval(page, """() => {
-        // Specific: TradeResultDialog close button
-        const specific = document.querySelector(
-            '.TradeResultDialog_WithdrawDialog_UiWaD .ant-modal-close');
-        if (specific) { specific.click(); return; }
-        // Generic ant-modal close (any visible ant-modal)
-        const anyClose = document.querySelector('.ant-modal-close');
-        if (anyClose) { anyClose.click(); return; }
-        // Fallback: click inside TradeResultDialog to trigger close
-        const dialog = document.querySelector('.TradeResultDialog_WithdrawDialog_UiWaD');
-        if (dialog) {
-            const btn = dialog.querySelector('button, [class*="close"], [class*="Close"]');
-            if (btn) btn.click();
-        }
-    }""")
-    page.wait_for_timeout(600)
-    # Method 2: If popup still visible, click the modal mask (Ant Design maskClosable)
+    # Method 1: Playwright semantic — find dialog by role + "Trade result" text, click Close btn
+    closed = False
     try:
-        modal_visible = _safe_eval(page, """() => {
-            const m = document.querySelector('.TradeResultDialog_WithdrawDialog_UiWaD');
-            if (!m) return false;
-            const r = m.getBoundingClientRect();
-            return r.width > 0 && r.height > 0;
-        }""", default=False)
-        if modal_visible:
-            _safe_eval(page, """() => {
-                const wrap = document.querySelector('.ant-modal-wrap');
-                if (wrap) {
-                    // Click the mask area (outside the dialog content)
-                    wrap.click();
-                }
-            }""")
-            page.wait_for_timeout(400)
+        dlg = page.get_by_role("dialog").filter(
+            has_text=re.compile(r"Trade result", re.I)
+        )
+        if dlg.count() > 0:
+            # Close button has accessible name "Close" (case-insensitive)
+            btn = dlg.first.get_by_role("button", name=re.compile(r"close", re.I))
+            if btn.count() > 0:
+                btn.first.click(force=True)
+                closed = True
     except Exception:
         pass
-    # Method 3: Playwright force click on ant-modal-close
-    try:
-        close_x = page.locator(".ant-modal-close").first
-        if close_x.count() > 0 and close_x.is_visible():
-            close_x.click(force=True)
-            page.wait_for_timeout(300)
-    except Exception:
-        pass
+    page.wait_for_timeout(500)
+
+    # Method 2: JS — find dialog with "Trade result", click first button inside it
+    if not closed or get_page_state(page) == "result":
+        _safe_eval(page, """() => {
+            const dialogs = document.querySelectorAll('[role="dialog"]');
+            for (const d of dialogs) {
+                if (!d.textContent.includes('Trade result')) continue;
+                // Try specific selectors for the close button
+                const btn = d.querySelector(
+                    'button[aria-label="Close"], button[aria-label="close"], ' +
+                    'button:has(img[alt="close"]), button:has(img[alt="Close"]), ' +
+                    '.ant-modal-close, [class*="close-btn"], [class*="closeBtn"]'
+                ) || d.querySelector('button');
+                if (btn) { btn.click(); return; }
+            }
+        }""")
+        page.wait_for_timeout(500)
+
+    # Method 3: Playwright force click — any button in any dialog
+    if get_page_state(page) == "result":
+        try:
+            btn = page.get_by_role("dialog").get_by_role("button").first
+            if btn.count() > 0:
+                btn.click(force=True)
+                page.wait_for_timeout(400)
+        except Exception:
+            pass
 
 
 def _dismiss_notifications(page):
@@ -592,16 +598,17 @@ def click_direction(page, direction: str) -> bool:
 
     # Up to 3 click attempts — site occasionally needs a moment after amount entry
     for attempt in range(3):
-        # Guard: if already active (from a previous successful click), don't click again
-        pre_state = get_page_state(page)
-        if pre_state == "active":
-            print(f"  [direction] [OK] Already ACTIVE before click (attempt {attempt+1})")
-            return True
-        if pre_state == "result":
-            print(f"  [direction] WARN: result popup open before click — closing")
-            _close_result_popup(page)
-            page.wait_for_timeout(500)
-            continue
+        # On RETRIES only (attempt > 0): check if a previous click already succeeded
+        if attempt > 0:
+            pre_state = get_page_state(page)
+            if pre_state == "active":
+                print(f"  [direction] [OK] Already ACTIVE (retry {attempt} confirms success)")
+                return True
+            if pre_state == "result":
+                print(f"  [direction] WARN: result popup open before click — closing")
+                _close_result_popup(page)
+                page.wait_for_timeout(500)
+                continue
 
         wait_for_loading_gone(page)
         _dismiss_notifications(page)
