@@ -65,6 +65,33 @@ else:
 POLL_TIMEOUT = int(os.environ.get("TELEGRAM_POLL_TIMEOUT", "30"))
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 FILE_API_BASE = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
+
+# ── Access-code authentication ────────────────────────────
+AUTH_CODE = (os.environ.get("BOT_AUTH_CODE", "").strip()
+             or str(getattr(config, "BOT_AUTH_CODE", "") or "").strip())
+AUTHORIZED_CHATS_FILE = DATA_DIR / "authorized_chats.json"
+AUTHORIZED_CHATS: set[str] = set()
+
+
+def load_authorized_chats():
+    global AUTHORIZED_CHATS
+    if AUTHORIZED_CHATS_FILE.exists():
+        try:
+            with open(AUTHORIZED_CHATS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                AUTHORIZED_CHATS = {str(x) for x in data}
+                print(f"[auth] Loaded {len(AUTHORIZED_CHATS)} authorized chat(s)")
+        except Exception as e:
+            print(f"[auth] Failed to load authorized chats: {e}")
+
+
+def save_authorized_chats():
+    try:
+        with open(AUTHORIZED_CHATS_FILE, "w", encoding="utf-8") as f:
+            json.dump(sorted(AUTHORIZED_CHATS), f, indent=2)
+    except Exception as e:
+        print(f"[auth] Failed to save authorized chats: {e}")
 ORDER_PATTERN = re.compile(
     r"^\s*[A-Za-z][A-Za-z0-9/ ]+\s+\d+(?:\.\d+)?\s+(?:up|down)\s+\d+s(?:\s+(?:desktop|mobile))?\s*$",
     re.I,
@@ -1161,6 +1188,34 @@ def extract_text_from_update(update: dict) -> Optional[TradeTask]:
     if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
         return None
 
+    # Access code gate. Until the user enters the right code, every message
+    # is intercepted and they receive a prompt. /logout removes the auth.
+    if AUTH_CODE:
+        if text.strip().lower() in ("/logout", "logout"):
+            if chat_id in AUTHORIZED_CHATS:
+                AUTHORIZED_CHATS.discard(chat_id)
+                save_authorized_chats()
+                send_message(chat_id, "🔒 Logged out. Send the access code to use the bot again.", message_id)
+            else:
+                send_message(chat_id, "🔒 Not authenticated.", message_id)
+            return None
+        if chat_id not in AUTHORIZED_CHATS:
+            if text.strip() == AUTH_CODE:
+                AUTHORIZED_CHATS.add(chat_id)
+                save_authorized_chats()
+                send_message(
+                    chat_id,
+                    "✅ Access code accepted.\n\nYou can now use the bot. Type /help for commands.",
+                    message_id,
+                )
+            else:
+                send_message(
+                    chat_id,
+                    "🔐 This bot requires an access code.\n\nPlease send the access code to continue.",
+                    message_id,
+                )
+            return None
+
     # Handle management commands first (supports both /cmd and cmd)
     if handle_management_command(chat_id, text, message_id):
         return None
@@ -1379,6 +1434,7 @@ def main():
     _acquire_lock()
 
     load_sessions()
+    load_authorized_chats()
     SCREENSHOT_DIR.mkdir(exist_ok=True)
     BOT_START_TIME = time.time()
 
