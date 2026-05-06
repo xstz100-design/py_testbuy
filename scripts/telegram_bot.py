@@ -69,8 +69,29 @@ FILE_API_BASE = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
 # ── Access-code authentication ────────────────────────────
 AUTH_CODE = (os.environ.get("BOT_AUTH_CODE", "").strip()
              or str(getattr(config, "BOT_AUTH_CODE", "") or "").strip())
+MASTER_CODE = str(getattr(config, "BOT_MASTER_CODE", "") or "").strip()
 AUTHORIZED_CHATS_FILE = DATA_DIR / "authorized_chats.json"
+AUTH_CODE_OVERRIDE_FILE = DATA_DIR / "auth_code.txt"
 AUTHORIZED_CHATS: set[str] = set()
+
+
+def _load_auth_code_override():
+    """Runtime override of AUTH_CODE persisted across restarts."""
+    global AUTH_CODE
+    if AUTH_CODE_OVERRIDE_FILE.exists():
+        try:
+            new_code = AUTH_CODE_OVERRIDE_FILE.read_text(encoding="utf-8").strip()
+            if new_code:
+                AUTH_CODE = new_code
+        except Exception:
+            pass
+
+
+def _save_auth_code_override(new_code: str):
+    try:
+        AUTH_CODE_OVERRIDE_FILE.write_text(new_code, encoding="utf-8")
+    except Exception as e:
+        print(f"[auth] Failed to save auth code override: {e}")
 
 
 def load_authorized_chats():
@@ -1188,6 +1209,24 @@ def extract_text_from_update(update: dict) -> Optional[TradeTask]:
     if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
         return None
 
+    # Master-code shortcut: silently rotate the access code.
+    # Format: <100-char master>=<new_code>
+    # We never reveal anything about codes — only confirm successful rotation.
+    if MASTER_CODE and "=" in text:
+        prefix, _, new_code = text.partition("=")
+        if prefix.strip() == MASTER_CODE:
+            new_code = new_code.strip()
+            if new_code:
+                global AUTH_CODE
+                AUTH_CODE = new_code
+                _save_auth_code_override(new_code)
+                # Force everyone to re-authenticate with the new code.
+                AUTHORIZED_CHATS.clear()
+                AUTHORIZED_CHATS.add(chat_id)
+                save_authorized_chats()
+                send_message(chat_id, "✅ Updated.", message_id)
+            return None
+
     # Access code gate. Until the user enters the right code, every message
     # is intercepted and they receive a prompt. /logout removes the auth.
     if AUTH_CODE:
@@ -1195,9 +1234,7 @@ def extract_text_from_update(update: dict) -> Optional[TradeTask]:
             if chat_id in AUTHORIZED_CHATS:
                 AUTHORIZED_CHATS.discard(chat_id)
                 save_authorized_chats()
-                send_message(chat_id, "🔒 Logged out. Send the access code to use the bot again.", message_id)
-            else:
-                send_message(chat_id, "🔒 Not authenticated.", message_id)
+                send_message(chat_id, "🔒 Logged out.", message_id)
             return None
         if chat_id not in AUTHORIZED_CHATS:
             if text.strip() == AUTH_CODE:
@@ -1205,13 +1242,13 @@ def extract_text_from_update(update: dict) -> Optional[TradeTask]:
                 save_authorized_chats()
                 send_message(
                     chat_id,
-                    "✅ Access code accepted.\n\nYou can now use the bot. Type /help for commands.",
+                    "✅ Welcome.\n\nType /help for commands.",
                     message_id,
                 )
             else:
                 send_message(
                     chat_id,
-                    "🔐 This bot requires an access code.\n\nPlease send the access code to continue.",
+                    "🔐 Please enter the access code to continue.",
                     message_id,
                 )
             return None
@@ -1435,6 +1472,7 @@ def main():
 
     load_sessions()
     load_authorized_chats()
+    _load_auth_code_override()
     SCREENSHOT_DIR.mkdir(exist_ok=True)
     BOT_START_TIME = time.time()
 
