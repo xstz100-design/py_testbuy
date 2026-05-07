@@ -161,7 +161,11 @@ def ensure_idle(page, timeout_s: int = 120):
     if state == "result":
         print("  [state] Closing leftover result popup...")
         _close_result_popup(page)
-        page.wait_for_timeout(1000)
+        # _close_result_popup already waits for animation; confirm idle
+        for _ in range(10):
+            if get_page_state(page) == "idle":
+                return
+            page.wait_for_timeout(300)
         return
 
     # state == "active": 正在倒计时，必须等结算
@@ -231,6 +235,13 @@ def _close_result_popup(page):
                 page.wait_for_timeout(400)
         except Exception:
             pass
+
+    # Final: wait for dialog animation to fully disappear before returning
+    for _ in range(10):
+        if get_page_state(page) != "result":
+            break
+        page.wait_for_timeout(200)
+    page.wait_for_timeout(300)
 
 
 def _dismiss_notifications(page):
@@ -739,9 +750,9 @@ def wait_for_result(page, duration: str, trade_start: float) -> dict:
 
         page.wait_for_timeout(1000)
 
-    print("  [warn] Result popup timeout")
+    print("  [warn] Result popup timeout — raising to trigger retry")
     shot(page, f"timeout-{int(time.time())}")
-    return result
+    raise RuntimeError(f"wait_for_result: no result popup after {dur_sec+30}s")
 
 
 def _safe_playwright():  # type: ignore[return]
