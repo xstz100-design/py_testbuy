@@ -139,6 +139,9 @@ def _fill_amount_js(page, amount: str) -> str:
                     const setter = Object.getOwnPropertyDescriptor(
                         window.HTMLInputElement.prototype, 'value'
                     ).set;
+                    // Clear first, then set new value
+                    setter.call(input, '');
+                    input.dispatchEvent(new Event('input',  {bubbles: true}));
                     setter.call(input, amount);
                     input.dispatchEvent(new Event('input',  {bubbles: true}));
                     input.dispatchEvent(new Event('change', {bubbles: true}));
@@ -247,6 +250,8 @@ def deposit(account: str, password: str, amount: str) -> dict:
                         parent = section.locator("xpath=ancestor::*[3]")
                         inp = parent.locator("input").last
                         inp.click(force=True)
+                        page.keyboard.press("Control+A")
+                        page.keyboard.press("Delete")
                         page.keyboard.press("Control+A")
                         page.keyboard.type(str(amount), delay=60)
                         page.wait_for_timeout(400)
