@@ -12,9 +12,13 @@ ENV/
 scripts/config.py
 scripts/auth.json
 scripts/telegram_session.json
+scripts/authorized_chats.json
+scripts/auth_code.txt
 scripts/instances/*/config.py
 scripts/instances/*/auth.json
 scripts/instances/*/telegram_session.json
+scripts/instances/*/authorized_chats.json
+scripts/instances/*/auth_code.txt
 
 # Runtime data
 scripts/screenshots/
