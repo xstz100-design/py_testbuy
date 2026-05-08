@@ -367,6 +367,63 @@ def _execute_withdraw(chat_id: str, amount: str, account: str, password: str,
         return f"Withdrawal error: {e}", None
 
 
+def handle_deposit_command(chat_id: str, text: str) -> tuple:
+    """Handle deposit command. Returns (type, response) tuple."""
+    dp_match = re.match(r'^dp\s*=\s*(\d+(?:\.\d+)?)$', text.strip(), re.I)
+    if not dp_match:
+        return None, None
+    amount = dp_match.group(1)
+    session = get_session(chat_id)
+    acc = _get_active_account(session)
+    account = acc["account"] if acc else config.ACCOUNT
+    password = acc["password"] if acc else config.PASSWORD
+    return "deposit", _execute_deposit(chat_id, amount, account, password)
+
+
+def _execute_deposit(chat_id: str, amount: str, account: str, password: str) -> tuple:
+    """Execute a deposit via deposit.py script. Returns (message, screenshot_path)."""
+    deposit_script = ROOT_DIR / "deposit.py"
+    if not deposit_script.exists():
+        return "deposit.py not found", None
+
+    command = [
+        sys.executable,
+        str(deposit_script),
+        "--account", account,
+        "--password", password,
+        "--amount", amount,
+    ]
+
+    worker = get_worker(chat_id)
+    lock = _get_account_lock(account)
+    start_time = time.time()
+    try:
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
+                   BP_SCREENSHOT_DIR=str(worker.screenshot_dir))
+        with lock:
+            proc = subprocess.run(
+                command,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                env=env, cwd=str(ROOT_DIR), timeout=120,
+            )
+        result = extract_result_from_output(proc.stdout)
+        shot = worker.latest_deposit_screenshot(start_time)
+        if result and result.get("status") == "ok":
+            msg = (
+                f"Deposit request submitted\n"
+                f"Amount: $ {amount}\n"
+                f"Message: {result.get('message', 'OK')}"
+            )
+            return msg, shot
+        err = (result or {}).get("message", proc.stdout[-300:] if proc.stdout else "Unknown error")
+        return f"Deposit failed\nError: {err}", shot
+    except subprocess.TimeoutExpired:
+        worker = get_worker(chat_id)
+        return "Deposit timeout (120s)", worker.latest_deposit_screenshot(start_time)
+    except Exception as e:
+        return f"Deposit error: {e}", None
+
+
 def handle_setting_command(chat_id: str, text: str) -> Optional[str]:
     """Parse setting commands like mode=mobile, delay=5. Returns response message or None."""
     text_lower = text.lower().strip()
@@ -582,6 +639,15 @@ class UserWorker:
             return None
         candidates = [
             f for f in self.screenshot_dir.glob("withdraw-*.png")
+            if f.is_file() and f.stat().st_mtime > after_timestamp
+        ]
+        return max(candidates, key=lambda f: f.stat().st_mtime) if candidates else None
+
+    def latest_deposit_screenshot(self, after_timestamp: float) -> Optional[Path]:
+        if not self.screenshot_dir.exists():
+            return None
+        candidates = [
+            f for f in self.screenshot_dir.glob("deposit-*.png")
             if f.is_file() and f.stat().st_mtime > after_timestamp
         ]
         return max(candidates, key=lambda f: f.stat().st_mtime) if candidates else None
@@ -957,6 +1023,9 @@ def get_help_text(session: dict) -> str:
   acc=0 (use default config account)
   /accounts - list all accounts
 
+[Deposit]
+  dp=AMOUNT (submit deposit request)
+
 [Withdrawal]
   erc20=YOUR_WALLET_ADDRESS
   wdmethod=usdt or wdmethod=bank
@@ -1270,6 +1339,21 @@ def extract_text_from_update(update: dict) -> Optional[TradeTask]:
         return None
     elif wd_type == "withdraw":
         msg, shot_path = wd_response
+        shot_path = Path(shot_path) if shot_path and not isinstance(shot_path, Path) else shot_path
+        if shot_path and shot_path.exists():
+            send_photo(chat_id, shot_path, msg)
+            try:
+                shot_path.unlink()
+            except Exception:
+                pass
+        else:
+            send_message(chat_id, msg, message_id)
+        return None
+
+    # Check for deposit commands
+    dp_type, dp_response = handle_deposit_command(chat_id, text)
+    if dp_type == "deposit":
+        msg, shot_path = dp_response
         shot_path = Path(shot_path) if shot_path and not isinstance(shot_path, Path) else shot_path
         if shot_path and shot_path.exists():
             send_photo(chat_id, shot_path, msg)
