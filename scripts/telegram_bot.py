@@ -1170,23 +1170,40 @@ def send_message(chat_id: str, text: str, reply_to_message_id: Optional[int] = N
     }
     if reply_to_message_id is not None:
         payload["reply_to_message_id"] = reply_to_message_id
-    telegram_api("sendMessage", payload)
+    for attempt in range(4):
+        try:
+            telegram_api("sendMessage", payload)
+            return
+        except Exception as e:
+            if attempt < 3:
+                wait = 2 ** attempt  # 1s, 2s, 4s
+                print(f"[telegram] sendMessage failed (attempt {attempt+1}/4): {e}, retrying in {wait}s")
+                time.sleep(wait)
+            else:
+                print(f"[telegram] sendMessage permanently failed: {e}")
 
 
 def send_photo(chat_id: str, photo_path: Path, caption: str) -> bool:
     """Send photo and return True if successful."""
-    try:
-        telegram_api(
-            "sendPhoto",
-            {"chat_id": chat_id, "caption": caption},
-            {"photo": str(photo_path)},
-        )
-        return True
-    except Exception as e:
-        print(f"[telegram] Failed to send photo: {e}")
-        # Fallback to text message if photo fails
-        send_message(chat_id, f"{caption}\n\n(Screenshot upload failed: {e})")
-        return False
+    for attempt in range(3):
+        try:
+            telegram_api(
+                "sendPhoto",
+                {"chat_id": chat_id, "caption": caption},
+                {"photo": str(photo_path)},
+            )
+            return True
+        except Exception as e:
+            if attempt < 2:
+                wait = 2 ** attempt
+                print(f"[telegram] Failed to send photo (attempt {attempt+1}/3): {e}, retrying in {wait}s")
+                time.sleep(wait)
+            else:
+                print(f"[telegram] Failed to send photo: {e}")
+                # Fallback to text message if photo fails
+                send_message(chat_id, f"{caption}\n\n(Screenshot upload failed: {e})")
+                return False
+    return False
 
 
 def parse_message_text(text: str, chat_id: Optional[str] = None) -> tuple[str, list[str]]:
@@ -1381,16 +1398,22 @@ def poll_updates():
     Preemption policy:
     - Newly started instance should win.
     - Long-running instance should yield quickly after receiving 409.
+    - EXCEPTION: 409 after a network disconnect/reconnect is a Telegram server
+      artifact (it still considers the dropped connection active). In this case
+      we must NOT exit — just retry until the stale connection expires.
     """
     _NEW_INSTANCE_GRAB_SECONDS = 20
-    _OLD_INSTANCE_YIELD_AFTER_409 = 2
+    _OLD_INSTANCE_YIELD_AFTER_409 = 5      # raised from 2 → 5 for safety
+    _NETWORK_RECONNECT_GRACE = 180         # seconds: after a network error, treat
+                                           # subsequent 409s as reconnect artifacts
     _consecutive_409 = 0
     _boot_ts = time.time()
+    _last_network_error_ts = 0.0           # tracks most recent non-409 network error
+    _net_err_count = 0                     # consecutive network errors (for backoff)
 
-    # Keep 409 retry short to speed up takeover.
-    _SLEEP_409_SECONDS = 1
-    _SLEEP_OTHER_ERROR_SECONDS = 3
-
+    _SLEEP_409_SECONDS = 2
+    _SLEEP_OTHER_ERROR_MIN = 3
+    _SLEEP_OTHER_ERROR_MAX = 30
 
     offset = 0
     while True:
@@ -1403,8 +1426,10 @@ def poll_updates():
                     "allowed_updates": json.dumps(["message", "edited_message"]),
                 },
             )
-            # Successful poll → reset 409 counter
+            # Successful poll → reset all error counters
             _consecutive_409 = 0
+            _last_network_error_ts = 0.0
+            _net_err_count = 0
             for update in updates:
                 offset = max(offset, update["update_id"] + 1)
                 task = extract_text_from_update(update)
@@ -1435,7 +1460,22 @@ def poll_updates():
                 _consecutive_409 += 1
                 uptime = time.time() - _boot_ts
 
-                # New instance: keep grabbing aggressively, do not exit.
+                # Post-reconnect grace: if we recently had network errors, a 409 is
+                # just the Telegram server holding the old dropped connection open.
+                # Do NOT exit — simply wait for the stale connection to expire.
+                recently_reconnected = (
+                    _last_network_error_ts > 0
+                    and time.time() - _last_network_error_ts < _NETWORK_RECONNECT_GRACE
+                )
+                if recently_reconnected:
+                    print(
+                        f"[telegram] 409 after reconnect (#{_consecutive_409}) "
+                        f"— waiting for stale connection to expire..."
+                    )
+                    time.sleep(_SLEEP_409_SECONDS * min(_consecutive_409, 10))
+                    continue
+
+                # New instance startup: keep grabbing aggressively, do not exit.
                 if uptime <= _NEW_INSTANCE_GRAB_SECONDS:
                     print(
                         f"[telegram] 409 Conflict (startup-grab, "
@@ -1444,7 +1484,7 @@ def poll_updates():
                     time.sleep(_SLEEP_409_SECONDS)
                     continue
 
-                # Old instance: yield fast so the newer instance can take over.
+                # Old instance: yield so the newer instance can take over.
                 print(
                     f"[telegram] 409 Conflict (running {int(uptime)}s, "
                     f"{_consecutive_409}/{_OLD_INSTANCE_YIELD_AFTER_409})"
@@ -1459,13 +1499,22 @@ def poll_updates():
 
                 time.sleep(_SLEEP_409_SECONDS)
             else:
+                # Non-409 network error (DNS failure, connection reset, timeout, etc.)
                 _consecutive_409 = 0
-                print(f"[telegram] Network error: {exc}")
-                time.sleep(_SLEEP_OTHER_ERROR_SECONDS)
+                _last_network_error_ts = time.time()
+                _net_err_count += 1
+                # Exponential backoff: 3s, 6s, 12s, 24s, 30s (max)
+                sleep_time = min(
+                    _SLEEP_OTHER_ERROR_MIN * (2 ** min(_net_err_count - 1, 3)),
+                    _SLEEP_OTHER_ERROR_MAX,
+                )
+                print(f"[telegram] Network error (#{_net_err_count}): {exc} — retry in {sleep_time}s")
+                time.sleep(sleep_time)
         except Exception as exc:
             _consecutive_409 = 0
+            _net_err_count += 1
             print(f"[telegram] Polling error: {exc}")
-            time.sleep(_SLEEP_OTHER_ERROR_SECONDS)
+            time.sleep(_SLEEP_OTHER_ERROR_MIN)
 
 
 def main():

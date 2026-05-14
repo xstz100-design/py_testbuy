@@ -447,99 +447,70 @@ def select_currency(page, currency: str) -> bool:
 
     def _find_and_tap() -> bool:
         """
-        Find the currency row and tap it.
-        Strategy 1: Playwright get_by_text (exact) — works regardless of CSS class.
-        Strategy 2: JS broad scan of ALL li/div/span for exact text match.
-        Strategy 3: JS with partial/case-insensitive match as last resort.
-        Repeat with scroll-down up to 12 passes.
+        Find the currency row (.item-content) and click it via JS.
+        Matches the <span> inside .item-left for the currency name,
+        then clicks the full .item-content row (387x50px) — confirmed
+        by DOM analysis to be the correct Vue click target.
+        Scrolls 300px per step, up to 15 attempts (4500px total).
         """
         search_texts = list(dict.fromkeys([
             display, display.upper(), display.lower(),
             display.capitalize(), currency.upper(), currency.lower(),
         ]))
+        normalized_upper = [t.upper().strip() for t in search_texts]
 
         # Reset scroll to top
-        page.evaluate("""() => {
-            (document.scrollingElement || document.body).scrollTo(0, 0);
-        }""")
+        page.evaluate("() => { (document.scrollingElement || document.body).scrollTo(0, 0); }")
         page.wait_for_timeout(300)
 
-        for attempt in range(12):
+        for attempt in range(15):
             if attempt == 0:
                 close_market_popup(page)
 
-            # ── Strategy 1: Playwright get_by_text ──
-            # Does not depend on CSS class names at all
-            for txt in search_texts:
-                try:
-                    loc = page.get_by_text(txt, exact=True).first
-                    if loc.count() > 0:
-                        box = loc.bounding_box()
-                        if box and 0 <= box["y"] <= 1800 and box["height"] > 8:
-                            loc.tap()
-                            print(f"  [currency] Tapped via get_by_text: {txt}")
-                            return True
-                except Exception:
-                    pass
-
-            # ── Strategy 2: JS broad exact scan (ALL li/div/span) ──
-            # Uses direct text node content — immune to class name changes
-            found = page.evaluate("""({upperTexts, rawTexts}) => {
-                const all = document.querySelectorAll('li, div, span, td');
-                for (const el of all) {
-                    // Only look at direct text content (not aggregated child text)
-                    const own = Array.from(el.childNodes)
-                        .filter(n => n.nodeType === 3)
-                        .map(n => n.textContent.trim())
-                        .join('').trim();
-                    if (!own) continue;
-                    const upper = own.toUpperCase();
-                    if (!upperTexts.includes(upper) && !rawTexts.includes(own)) continue;
-                    const r = el.getBoundingClientRect();
-                    if (r.width < 5 || r.height < 5) continue;
-                    if (r.y < 0 || r.y > window.innerHeight + 200) continue;
-                    // Prefer tapping the parent row (larger click area)
-                    let target = el;
-                    const p = el.parentElement;
-                    if (p) {
-                        const pr = p.getBoundingClientRect();
-                        if (pr.height > r.height && pr.width > 80) target = p;
-                    }
-                    target.click();
-                    return own;
+            # ── Primary: find .item-content row whose .item-left span matches ──
+            found = page.evaluate("""(normalized) => {
+                const vh = window.innerHeight;
+                for (const row of document.querySelectorAll('.item-content')) {
+                    const span = row.querySelector('.item-left span');
+                    if (!span) continue;
+                    const rowText = (span.textContent || '').trim();
+                    if (!normalized.includes(rowText.toUpperCase().trim())) continue;
+                    const r = row.getBoundingClientRect();
+                    if (r.bottom < 0 || r.top > vh + 50) continue;
+                    if (r.width < 50) continue;
+                    row.click();
+                    return rowText;
                 }
                 return null;
-            }""", {"upperTexts": [t.upper() for t in search_texts], "rawTexts": search_texts})
+            }""", normalized_upper)
+
             if found:
-                print(f"  [currency] Tapped via JS broad scan: {found}")
+                print(f"  [currency] Tapped .item-content row: {found}")
                 return True
 
-            # ── Strategy 3: JS case-insensitive partial match (last resort) ──
+            # ── Fallback after 6 attempts: partial match on .item-content ──
             if attempt >= 6:
                 found2 = page.evaluate("""(upper) => {
-                    const all = document.querySelectorAll('li, div, span');
-                    for (const el of all) {
-                        const t = (el.innerText || el.textContent || '').trim().toUpperCase();
+                    const vh = window.innerHeight;
+                    for (const row of document.querySelectorAll('.item-content')) {
+                        const span = row.querySelector('.item-left span');
+                        if (!span) continue;
+                        const t = (span.textContent || '').trim().toUpperCase();
                         if (!t.includes(upper)) continue;
-                        if (t.length > upper.length * 3) continue; // skip large containers
-                        const r = el.getBoundingClientRect();
-                        if (r.width < 5 || r.height < 5) continue;
-                        if (r.y < 0 || r.y > window.innerHeight + 200) continue;
-                        el.click();
+                        const r = row.getBoundingClientRect();
+                        if (r.bottom < 0 || r.top > vh + 50) continue;
+                        row.click();
                         return t;
                     }
                     return null;
                 }""", display.upper())
                 if found2:
-                    print(f"  [currency] Tapped via partial JS scan: {found2}")
+                    print(f"  [currency] Tapped via partial match: {found2}")
                     return True
 
-            # Scroll down to reveal more items
-            page.evaluate("""() => {
-                (document.scrollingElement || document.body)
-                    .scrollBy({top: 300, behavior: 'instant'});
-            }""")
-            page.wait_for_timeout(500)
+            # Scroll down 300px to reveal more rows
+            page.evaluate("() => { (document.scrollingElement || document.body).scrollBy({top: 300, behavior: 'instant'}); }")
+            page.wait_for_timeout(400)
 
         return False
 
@@ -560,6 +531,12 @@ def select_currency(page, currency: str) -> bool:
         return False
 
     # ── 验证：等待交易面板出现（不依赖 URL 格式）──
+    # First wait for URL to contain "chart" (navigation triggered by row click)
+    try:
+        page.wait_for_url(lambda url: "chart" in url, timeout=10000)
+    except Exception:
+        pass  # URL might already match or use different format
+
     try:
         page.locator(".amount-btn, .amount-box, .down-btn, .up-btn").first \
             .wait_for(state="visible", timeout=15000)
@@ -697,30 +674,39 @@ def click_direction(page, direction: str):
     for attempt in range(3):
         if attempt > 0:
             print(f"  [direction] Retry {attempt}...")
-            page.wait_for_timeout(600 + attempt * 400)
+            page.wait_for_timeout(800 + attempt * 500)
 
         close_market_popup(page)
         wait_for_loading_gone(page)
 
         btn = page.locator(cls).first
+        tapped = False
         try:
             btn.wait_for(state="visible", timeout=10000)
             btn.tap()
+            tapped = True
         except Exception:
-            try:
-                page.get_by_text(re.compile(
-                    rf"^\s*{direction}\s*$", re.I)).last.tap(timeout=5000)
-            except Exception:
+            # Fallback: JS click on the div button directly
+            js_clicked = page.evaluate(f"""() => {{
+                const b = document.querySelector('{cls}');
+                if (b) {{ b.click(); return true; }}
+                return false;
+            }}""")
+            if js_clicked:
+                tapped = True
+            else:
                 if attempt < 2:
                     continue
                 print(f"  [direction] FAIL: {direction.upper()} button not found")
                 return 0.0
 
-        page.wait_for_timeout(800)
+        # Wait longer for trade to register (server round-trip + UI update)
+        page.wait_for_timeout(1500)
 
         # ── 验证进入 ACTIVE 状态 ──
+        # Check both "Expiration time" text AND MM:SS countdown pattern
         state = get_page_state(page)
-        if state == "active":
+        if state == "active" or _is_countdown_visible(page):
             trade_start = time.time()
             print(f"  [direction] [OK] Order placed, trade ACTIVE (attempt {attempt + 1})")
             # 立即安装 MutationObserver 捕获结算弹窗
