@@ -13,10 +13,16 @@ USER_DATA_FILES=(
     "$SCRIPT_DIR/telegram_session.json"
     "$SCRIPT_DIR/authorized_chats.json"
     "$SCRIPT_DIR/auth_code.txt"
+    "$SCRIPT_DIR/bptrading/config.py"
+    "$SCRIPT_DIR/bptrading/auth.json"
+    "$SCRIPT_DIR/bptrading/telegram_session.json"
+    "$SCRIPT_DIR/bptrading/authorized_chats.json"
+    "$SCRIPT_DIR/bptrading/auth_code.txt"
 )
 
 BACKUP_DIR="$SCRIPT_DIR/.userdata_backup"
 mkdir -p "$BACKUP_DIR"
+mkdir -p "$BACKUP_DIR/bptrading"
 
 echo "=== BPTrading Safe Update ==="
 echo "Project: $PROJECT_DIR"
@@ -32,9 +38,12 @@ echo ""
 echo "[2/5] Backing up user data..."
 for f in "${USER_DATA_FILES[@]}"; do
     if [ -f "$f" ]; then
-        fname="$(basename "$f")"
-        cp "$f" "$BACKUP_DIR/$fname"
-        echo "  Backed up: $fname"
+        # Use path relative to SCRIPT_DIR as backup key (preserves subdir structure)
+        rel="${f#$SCRIPT_DIR/}"
+        dest="$BACKUP_DIR/$rel"
+        mkdir -p "$(dirname "$dest")"
+        cp "$f" "$dest"
+        echo "  Backed up: $rel"
     fi
 done
 
@@ -48,10 +57,12 @@ if [ $GIT_EXIT -ne 0 ]; then
     echo "ERROR: git pull failed (exit $GIT_EXIT). Aborting."
     echo "Restoring user data..."
     for f in "${USER_DATA_FILES[@]}"; do
-        fname="$(basename "$f")"
-        if [ -f "$BACKUP_DIR/$fname" ]; then
-            cp "$BACKUP_DIR/$fname" "$f"
-            echo "  Restored: $fname"
+        rel="${f#$SCRIPT_DIR/}"
+        src="$BACKUP_DIR/$rel"
+        if [ -f "$src" ]; then
+            mkdir -p "$(dirname "$f")"
+            cp "$src" "$f"
+            echo "  Restored: $rel"
         fi
     done
     exit 1
@@ -61,10 +72,12 @@ fi
 echo ""
 echo "[4/5] Restoring user data..."
 for f in "${USER_DATA_FILES[@]}"; do
-    fname="$(basename "$f")"
-    if [ -f "$BACKUP_DIR/$fname" ]; then
-        cp "$BACKUP_DIR/$fname" "$f"
-        echo "  Restored: $fname"
+    rel="${f#$SCRIPT_DIR/}"
+    src="$BACKUP_DIR/$rel"
+    if [ -f "$src" ]; then
+        mkdir -p "$(dirname "$f")"
+        cp "$src" "$f"
+        echo "  Restored: $rel"
     fi
 done
 

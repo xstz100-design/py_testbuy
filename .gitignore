@@ -14,6 +14,11 @@ scripts/auth.json
 scripts/telegram_session.json
 scripts/authorized_chats.json
 scripts/auth_code.txt
+scripts/bptrading/config.py
+scripts/bptrading/auth.json
+scripts/bptrading/telegram_session.json
+scripts/bptrading/authorized_chats.json
+scripts/bptrading/auth_code.txt
 scripts/instances/*/config.py
 scripts/instances/*/auth.json
 scripts/instances/*/telegram_session.json
@@ -22,10 +27,13 @@ scripts/instances/*/auth_code.txt
 
 # Runtime data
 scripts/screenshots/
+scripts/bptrading/screenshots/
 scripts/instances/*/screenshots/
 scripts/watchdog.log
+scripts/bptrading/watchdog.log
 scripts/instances/*/watchdog.log
 scripts/.bot.pid
+scripts/bptrading/.bot.pid
 scripts/instances/*/.bot.pid
 
 # Node
