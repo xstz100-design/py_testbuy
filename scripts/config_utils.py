@@ -131,6 +131,15 @@ CURRENCY_ALIASES: dict[str, str] = {
     "audusd":      "AUD/USD",
     "aud usd":     "AUD/USD",
     "aussie":      "AUD/USD",
+    # Forex 2-letter trader shorthand (e.g. EU = EUR/USD)
+    "eu":          "EUR/USD",
+    "gu":          "GBP/USD",
+    "uj":          "USD/JPY",
+    "ej":          "EUR/JPY",
+    "ea":          "EUR/AUD",
+    "au":          "AUD/USD",
+    "uc":          "USD/CAD",
+    "gc":          "GBP/CAD",
     # Crypto aliases
     "bitcoin":     "BTC",
     "btcusd":      "BTC",
@@ -150,17 +159,32 @@ CURRENCY_ALIASES: dict[str, str] = {
 def normalize_currency(currency: str) -> str:
     """Normalize user input to the canonical currency name.
     Handles common typos, abbreviations, case variations, and near-typos via fuzzy matching."""
-    import difflib
+    import difflib, re
     key = currency.strip().lower()
 
     # 1. Exact alias match
     if key in CURRENCY_ALIASES:
         return CURRENCY_ALIASES[key]
 
-    # 2. Exact canonical match (e.g. "BTC", "ETH")
+    # 2. Exact canonical match (e.g. "BTC", "EUR/USD")
     upper = currency.strip().upper()
     if upper in CURRENCY_CATEGORIES:
         return upper
+
+    # 2b. Normalize forex separator variants: EUR-USD / EUR.USD / EUR_USD / EUR\USD → EUR/USD
+    #     Matches XxxXxx patterns like GBP-USD, eur.usd, AUD_USD, gbp\usd
+    sep_norm = re.sub(
+        r'^([A-Za-z]{2,4})\s*[-._\\]\s*([A-Za-z]{2,4})$',
+        lambda m: f"{m.group(1).upper()}/{m.group(2).upper()}",
+        currency.strip(),
+    )
+    if sep_norm != currency.strip():
+        if sep_norm in CURRENCY_CATEGORIES:
+            return sep_norm
+        # Also try stripping slash to hit alias (e.g. "EURUSD")
+        no_slash = sep_norm.lower().replace('/', '')
+        if no_slash in CURRENCY_ALIASES:
+            return CURRENCY_ALIASES[no_slash]
 
     # 3. Fuzzy match against all known canonical names
     all_canonical = list(CURRENCY_CATEGORIES.keys())
