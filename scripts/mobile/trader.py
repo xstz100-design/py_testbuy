@@ -399,9 +399,9 @@ def select_currency(page, currency: str) -> bool:
         page.goto(TRADE_URL, wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(DELAYS["page_load"])
         close_market_popup(page)
-        # Wait for ANY list element to appear
+        # Wait for currency list rows to appear (specific to the list page)
         try:
-            page.locator("li, .list-title, .down-btn, .up-btn, span").first \
+            page.locator(".item-content, .list-title, li").first \
                 .wait_for(state="visible", timeout=12000)
         except Exception:
             page.wait_for_timeout(3000)
@@ -443,7 +443,12 @@ def select_currency(page, currency: str) -> bool:
             print(f"  [currency] Tab: {clicked}")
         else:
             print(f"  [currency] WARN: tab not found for {category}, proceeding anyway")
-        page.wait_for_timeout(900)
+        # Wait for the list to reload after tab switch — not a fixed delay
+        page.wait_for_timeout(400)
+        try:
+            page.locator(".item-content").first.wait_for(state="visible", timeout=5000)
+        except Exception:
+            page.wait_for_timeout(600)
 
     def _find_and_tap() -> bool:
         """
@@ -457,7 +462,22 @@ def select_currency(page, currency: str) -> bool:
             display, display.upper(), display.lower(),
             display.capitalize(), currency.upper(), currency.lower(),
         ]))
-        normalized_upper = [t.upper().strip() for t in search_texts]
+        # For forex pairs containing "/" (e.g. EUR/USD), also try slash-stripped
+        # and space-separated variants in case the site renders them differently
+        if "/" in display or "/" in currency:
+            _no_slash = display.upper().replace("/", "").replace(" ", "")
+            _space_sep = display.upper().replace("/", " ")
+            search_texts += [_no_slash, _space_sep,
+                             currency.upper().replace("/", ""),
+                             currency.upper().replace("/", " ")]
+        # For index futures, add common platform display-name aliases
+        _INDEX_EXTRA: dict = {
+            "ES":  ["S&P500", "S&P 500", "SP500", "US500", "SPX", "S&P"],
+            "NQ":  ["Nasdaq100", "Nasdaq 100", "NAS100", "US100", "Nasdaq", "NDX"],
+            "YM":  ["Dow30", "Dow Jones", "US30", "DJIA", "Dow"],
+        }
+        search_texts += _INDEX_EXTRA.get(currency.upper(), [])
+        normalized_upper = list(dict.fromkeys([t.upper().strip() for t in search_texts]))
 
         # Reset scroll to top
         page.evaluate("() => { (document.scrollingElement || document.body).scrollTo(0, 0); }")
@@ -584,6 +604,7 @@ def enter_amount(page, amount: str) -> bool:
             nativeSetter.call(inp, val);
             inp.dispatchEvent(new Event('input', {bubbles: true}));
             inp.dispatchEvent(new Event('change', {bubbles: true}));
+            inp.dispatchEvent(new Event('blur', {bubbles: true}));
         }""", amount)
         page.wait_for_timeout(400)
 
@@ -610,47 +631,56 @@ def select_duration(page, duration: str) -> bool:
     close_market_popup(page)
     wait_for_loading_gone(page)
 
+    # Wait for the duration selector to become visible
     tc = page.locator(".time-content").first
-    if tc.count() == 0:
-        print("  [duration] FAIL: .time-content not found")
-        return False
+    try:
+        tc.wait_for(state="visible", timeout=8000)
+    except Exception:
+        if page.locator(".time-content").count() == 0:
+            print("  [duration] FAIL: .time-content not found")
+            return False
 
-    tc.tap()
-    page.wait_for_timeout(1000)
-
-    selected = page.evaluate("""(target) => {
-        const popup = document.querySelector('.time-pop');
-        if (!popup) return 'no-popup';
-        for (const s of popup.querySelectorAll('span')) {
-            if (s.textContent.trim() === target) { s.click(); return 'ok'; }
-        }
-        const num = target.replace('s', '');
-        for (const s of popup.querySelectorAll('span')) {
-            if (s.textContent.trim().startsWith(num)) {
-                s.click(); return 'ok';
-            }
-        }
-        return 'not-found';
-    }""", dur_text)
-
-    if selected == "no-popup":
-        # 重试一次
+    def _pick_duration() -> str:
+        """Click .time-content, then select the duration span. Returns 'ok'/'no-popup'/'not-found'."""
         tc.tap()
         page.wait_for_timeout(1000)
-        selected = page.evaluate("""(target) => {
-            const popup = document.querySelector('.time-pop');
+        return page.evaluate("""(target) => {
+            // Try multiple possible popup selectors
+            const popup = document.querySelector(
+                '.time-pop, .time-popup, .time-panel, .van-picker, '
+                + 'div[class*="time-pop"], div[class*="timepop"]'
+            );
             if (!popup) return 'no-popup';
-            for (const s of popup.querySelectorAll('span')) {
-                if (s.textContent.trim() === target) {
-                    s.click(); return 'ok';
-                }
+            // Exact match first
+            for (const s of popup.querySelectorAll('span, li, div')) {
+                const t = s.textContent.trim();
+                if (t === target) { s.click(); return 'ok'; }
+            }
+            // Number-prefix match (e.g. "60" matches "60s" target)
+            const num = target.replace('s', '');
+            for (const s of popup.querySelectorAll('span, li, div')) {
+                const t = s.textContent.trim();
+                if (t.startsWith(num)) { s.click(); return 'ok'; }
             }
             return 'not-found';
         }""", dur_text)
 
+    selected = _pick_duration()
+    # Retry up to 2 more times if popup didn't appear
+    for _retry in range(2):
+        if selected != "no-popup":
+            break
+        print(f"  [duration] Popup not found (retry {_retry + 1})...")
+        page.wait_for_timeout(600)
+        selected = _pick_duration()
+
     page.wait_for_timeout(500)
-    time_display = page.locator(".time-content .time, .time-content").first \
-        .text_content().strip()
+    try:
+        time_display = page.locator(".time-content .time, .time-content").first \
+            .text_content().strip()
+    except Exception:
+        time_display = ""
+
     if duration in time_display:
         print(f"  [duration] [OK] Verified: {time_display}")
         return True
@@ -883,8 +913,8 @@ def wait_for_result(page, duration: str, r: int, trade_start: float) -> dict:
 
     result = {"won": False, "profit": "", "texts": ""}
 
-    # Wait until expiry + 5 seconds for settlement (total = duration + ~8s from click)
-    wait_until = expiry_at + 5.0
+    # Wait until expiry + 10 seconds for settlement (server processing + UI render)
+    wait_until = expiry_at + 10.0
     while time.time() < wait_until:
         # Check network settlement early
         if _network_settlement["detected"]:

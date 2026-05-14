@@ -1402,9 +1402,10 @@ def poll_updates():
       artifact (it still considers the dropped connection active). In this case
       we must NOT exit — just retry until the stale connection expires.
     """
-    _NEW_INSTANCE_GRAB_SECONDS = 20
+    _NEW_INSTANCE_GRAB_SECONDS = 3600     # 1 hour: after power outage, keep retrying
+                                           # until Telegram releases the stale connection
     _OLD_INSTANCE_YIELD_AFTER_409 = 5      # raised from 2 → 5 for safety
-    _NETWORK_RECONNECT_GRACE = 180         # seconds: after a network error, treat
+    _NETWORK_RECONNECT_GRACE = 3600        # 1 hour: after ANY network error, treat
                                            # subsequent 409s as reconnect artifacts
     _consecutive_409 = 0
     _boot_ts = time.time()
@@ -1628,6 +1629,19 @@ def main():
             print("\n[telegram] Shutting down...")
             _release_lock()
             break
+        except SystemExit as exc:
+            # poll_updates() raises SystemExit(0) when it yields to a newer instance.
+            # After a power outage + restart, this can be a false alarm (stale Telegram
+            # connection). Catch it and restart so the bot recovers automatically.
+            if exc.code == 0:
+                restart_count += 1
+                delay = min(5 * restart_count, max_restart_delay)
+                print(f"[telegram] Yield-exit caught (post-outage/restart). "
+                      f"Retrying in {delay}s (attempt #{restart_count})...")
+                time.sleep(delay)
+            else:
+                _release_lock()
+                raise
         except Exception as exc:
             import traceback
             restart_count += 1
