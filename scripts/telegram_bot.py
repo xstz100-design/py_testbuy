@@ -865,13 +865,22 @@ class UserWorker:
                             task.chat_id, f"[{i}/{total_orders}] Error: {e}"
                         )
 
+                    # Apply delay between batch orders (not after the last one)
+                    if delay > 0 and i < total_orders:
+                        send_message(
+                            task.chat_id,
+                            f"Delay: {delay}s — waiting before next order..."
+                        )
+                        time.sleep(delay)
+                        send_message(
+                            task.chat_id,
+                            f"Delay finished, proceeding..."
+                        )
+
                 send_message(
                     task.chat_id,
                     f"Batch completed: {success_count} OK / {fail_count} Failed",
                 )
-
-            if delay > 0 and mode == "single":
-                time.sleep(delay)
         except Exception as exc:
             import traceback
             print(f"[task][{self.chat_id}] Error: {exc}")

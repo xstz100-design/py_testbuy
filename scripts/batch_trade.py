@@ -27,8 +27,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 try:
     from config import normalize_currency as _normalize_currency
 except ImportError:
-    def _normalize_currency(c: str) -> str:  # type: ignore[misc]
-        return c.strip().upper()
+    def _normalize_currency(currency: str) -> str:  # type: ignore[misc]
+        return currency.strip().upper()
 
 
 @dataclass
