@@ -730,20 +730,17 @@ def click_direction(page, direction: str):
                 print(f"  [direction] FAIL: {direction.upper()} button not found")
                 return 0.0
 
-        # Wait longer for trade to register (server round-trip + UI update)
-        page.wait_for_timeout(1500)
-
-        # ── 验证进入 ACTIVE 状态 ──
-        # Check both "Expiration time" text AND MM:SS countdown pattern
-        state = get_page_state(page)
-        if state == "active" or _is_countdown_visible(page):
-            trade_start = time.time()
-            print(f"  [direction] [OK] Order placed, trade ACTIVE (attempt {attempt + 1})")
-            # 立即安装 MutationObserver 捕获结算弹窗
-            _install_settlement_observer(page)
-            return trade_start
-        if attempt < 2:
-            print(f"  [direction] State '{state}' after attempt {attempt + 1}, retrying...")
+        # Poll for active state up to 3s before retrying — prevents double-trade
+        # when the server accepts the order but the UI update is slow.
+        for _ in range(6):
+            page.wait_for_timeout(500)
+            state = get_page_state(page)
+            if state == "active" or _is_countdown_visible(page):
+                trade_start = time.time()
+                print(f"  [direction] [OK] Order placed, trade ACTIVE (attempt {attempt + 1})")
+                _install_settlement_observer(page)
+                return trade_start
+        print(f"  [direction] State still idle after 3s (attempt {attempt + 1}), retrying...")
 
     print(f"  [direction] FAIL: Expected ACTIVE after 3 attempts")
     return 0.0

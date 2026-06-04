@@ -119,20 +119,23 @@ def get_page_state(page) -> str:
             return "login"
     except Exception:
         pass
-    # Check result popup via role="dialog" + "Trade result" text (most reliable)
+    # Check result popup — match any of several text patterns the site may use
     try:
         dlg = page.get_by_role("dialog").filter(
-            has_text=re.compile(r"Trade result", re.I)
+            has_text=re.compile(r"Trade result|Profit:|You Won|You Lost|Settlement Completed|结算完成", re.I)
         )
         if dlg.count() > 0:
             return "result"
     except Exception:
         pass
-    # Fallback: JS-based check for any visible dialog containing "Trade result"
-    has_result = _safe_eval(page, """() => {
+    # Fallback: JS-based check for any visible dialog containing result indicators
+    has_result = _safe_eval(page, r"""() => {
+        const PATS = ['Trade result', 'Profit:', 'You Won', 'You Lost',
+                      'Settlement Completed', '结算完成'];
         const dialogs = document.querySelectorAll('[role="dialog"]');
         for (const d of dialogs) {
-            if (!d.textContent.includes('Trade result')) continue;
+            const txt = d.textContent || '';
+            if (!PATS.some(p => txt.includes(p))) continue;
             const r = d.getBoundingClientRect();
             const s = window.getComputedStyle(d);
             if (r.width > 0 && r.height > 0
@@ -673,14 +676,15 @@ def click_direction(page, direction: str) -> bool:
         wait_for_loading_gone(page)
         _dismiss_notifications(page)
         _do_click()
-        # Wait progressively longer on each attempt
-        page.wait_for_timeout(800 + attempt * 500)
-        state = get_page_state(page)
-        if state == "active":
-            print(f"  [direction] [OK] Order placed, trade ACTIVE (attempt {attempt+1})")
-            return True
-        if attempt < 2:
-            print(f"  [direction] State '{state}' after attempt {attempt+1}, retrying...")
+        # Poll for active state up to 3s before retrying — prevents double-trade
+        # when the server accepts the order but the UI update is slow.
+        for _ in range(6):
+            page.wait_for_timeout(500)
+            state = get_page_state(page)
+            if state == "active":
+                print(f"  [direction] [OK] Order placed, trade ACTIVE (attempt {attempt+1})")
+                return True
+        print(f"  [direction] State still idle after 3s (attempt {attempt+1}), retrying...")
 
     print(f"  [direction] FAIL: Expected ACTIVE state after 3 attempts")
     return False
