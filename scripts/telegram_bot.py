@@ -910,6 +910,7 @@ class UserWorker:
                         continue
 
                 self.current_task = task
+                self.stop_flag.clear()  # reset stale stop from previous /clear or /stop
                 print(f"[worker][{self.chat_id}] Processing task #{task.task_id}")
                 try:
                     self.handle_task(task)
