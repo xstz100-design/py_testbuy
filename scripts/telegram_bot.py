@@ -793,7 +793,7 @@ class UserWorker:
         print(f"[lock][{self.chat_id}] Waiting for account lock: {account}")
         with lock:
             print(f"[lock][{self.chat_id}] Acquired account lock: {account}")
-            _, result = self.run_command(command, timeout=300)
+            _, result = self.run_command(command, timeout=600)
         print(f"[lock][{self.chat_id}] Released account lock: {account}")
         message = format_single_result(result, order_text)
         return message, result
@@ -1291,7 +1291,7 @@ def format_batch_result(result: dict) -> str:
 
 
 def extract_text_from_update(update: dict) -> Optional[TradeTask]:
-    message = update.get("message") or update.get("edited_message")
+    message = update.get("message")
     if not message:
         return None
     text = (message.get("text") or "").strip()
@@ -1433,7 +1433,7 @@ def poll_updates():
                 {
                     "offset": offset,
                     "timeout": POLL_TIMEOUT,
-                    "allowed_updates": json.dumps(["message", "edited_message"]),
+                    "allowed_updates": json.dumps(["message"]),
                 },
             )
             # Successful poll → reset all error counters

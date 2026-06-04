@@ -693,6 +693,27 @@ def click_direction(page, direction: str) -> bool:
 # ═══════════════════════════════════════
 #  Step 5: Wait for Result + Close
 # ═══════════════════════════════════════
+def _read_result_from_popup(page) -> dict:
+    """Extract win/loss/profit data from the currently-visible result popup."""
+    page.wait_for_timeout(500)
+    return page.evaluate("""() => {
+        let won = false, profit = '', details = '';
+        for (const el of document.querySelectorAll('*')) {
+            const m = el.textContent.trim().match(/Profit:\\s*(\\d+\\.?\\d*)/i);
+            if (m) { profit = m[1]; won = parseFloat(profit) > 0; break; }
+        }
+        const rows = document.querySelectorAll('tr');
+        for (const row of rows) {
+            const cells = row.querySelectorAll('td');
+            if (cells.length >= 4) {
+                details = Array.from(cells).map(c => c.textContent.trim()).join(' | ');
+                break;
+            }
+        }
+        return {won, profit, details};
+    }""")
+
+
 def wait_for_result(page, duration: str, trade_start: float) -> dict:
     dur_sec = int(duration)
     # Must wait at least duration+5s from the moment the order was placed
@@ -710,29 +731,7 @@ def wait_for_result(page, duration: str, trade_start: float) -> dict:
     while time.time() < max_wait_until:
         state = get_page_state(page)
         if state == "result":
-            page.wait_for_timeout(500)
-            result = page.evaluate("""() => {
-                let won = false, profit = '', details = '';
-                for (const el of document.querySelectorAll('*')) {
-                    const m = el.textContent.trim()
-                        .match(/Profit:\\s*(\\d+\\.?\\d*)/i);
-                    if (m) {
-                        profit = m[1];
-                        won = parseFloat(profit) > 0;
-                        break;
-                    }
-                }
-                const rows = document.querySelectorAll('tr');
-                for (const row of rows) {
-                    const cells = row.querySelectorAll('td');
-                    if (cells.length >= 4) {
-                        details = Array.from(cells)
-                            .map(c => c.textContent.trim()).join(' | ');
-                        break;
-                    }
-                }
-                return {won, profit, details};
-            }""")
+            result = _read_result_from_popup(page)
 
             status = "Won" if result["won"] else "Lost"
             print(f"  [result] {status} | Profit: {result.get('profit', '0')}")
@@ -858,6 +857,18 @@ def run(currency, amount, duration, direction, rounds):
                     except RuntimeError as e:
                         last_err = e
                         print(f"  [retry] Step failed: {e}")
+                        # If wait_for_result timed out but popup appeared late, capture it
+                        if get_page_state(page) == "result":
+                            print("  [retry] Late result popup — capturing before discard")
+                            try:
+                                result = _read_result_from_popup(page)
+                                shot(page, f"result-late-{int(time.time())}")
+                                _close_result_popup(page)
+                                results.append(result)
+                                last_err = None
+                                break
+                            except Exception:
+                                pass
                         continue
 
                 if last_err:
